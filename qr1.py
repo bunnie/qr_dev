@@ -2,6 +2,44 @@ import cv2
 import numpy as np
 
 from ref_images import *
+from math import atan2, cos, sin
+
+FIXED_POINT_SHIFT = 16
+FIXED_POINT_ONE = 1 << FIXED_POINT_SHIFT
+
+class AffineTransform:
+    def __init__(self, a, b, c, d, tx, ty):
+        self.a = self.float_to_fixed(a)
+        self.b = self.float_to_fixed(b)
+        self.c = self.float_to_fixed(c)
+        self.d = self.float_to_fixed(d)
+        self.tx = self.float_to_fixed(tx)
+        self.ty = self.float_to_fixed(ty)
+
+    def float_to_fixed(self, value):
+        return int(value * FIXED_POINT_ONE)
+
+def get_pixel(image, width, height, x, y):
+    # Check for out-of-bounds coordinates, return 0 if outside
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return 0  # Black for out-of-bounds pixels
+    return image[y, x]
+
+def affine_transform(src, tform):
+    height, width = src.shape
+    dst = np.zeros_like(src, dtype=np.uint8)  # Create an empty output image
+
+    for y_dst in range(height):
+        for x_dst in range(width):
+            # Inverse affine transformation to get the source pixel coordinates
+            x_src_fixed = (tform.a * x_dst + tform.b * y_dst + tform.tx) >> FIXED_POINT_SHIFT
+            y_src_fixed = (tform.c * x_dst + tform.d * y_dst + tform.ty) >> FIXED_POINT_SHIFT
+
+            # Set the destination pixel using nearest-neighbor interpolation
+            dst[y_dst, x_dst] = get_pixel(src, width, height, int(x_src_fixed), int(y_src_fixed))
+
+    return dst
+
 
 def histogram(data):
     buckets = 256 * [0]
@@ -58,7 +96,7 @@ def finder_finder_sm(y, line, row_normal=True):
 
 
 if __name__ == "__main__":
-    qr_raw = cv2.imread('images/test5.png')
+    qr_raw = cv2.imread('images/test0.png')
 
     cv2.imshow('image', qr_raw)
 
@@ -136,3 +174,34 @@ if __name__ == "__main__":
 
     if len(marks) == 3:
         print("candidate good")
+    else:
+        exit(0)
+
+    # find top left, top right marks. This means we are searching QR codes
+    # "right side up". A rotation transform can be inserted that "right side ups"
+    # them if they are detected to be rotated.
+    tl = None
+    tr = None
+    for c in marks:
+        if c[0] < 64 and c[1] < 64:
+            tl = c
+        if c[0] > 64 and c[1] < 64:
+            tr = c
+
+    if tl is None or tr is None:
+        print("couldn't find top left or top right")
+        exit(0)
+
+    angle = atan2(tr[1] - tl[1], tr[0] - tl[0])
+    tform = AffineTransform(
+        a = cos(angle),
+        b = -sin(angle),
+        c = sin(angle),
+        d = cos(angle),
+        tx = 0,
+        ty = 0,
+    )
+
+    affined = affine_transform(binary, tform)
+    cv2.imshow('affine', affined)
+    cv2.waitKey(0)
