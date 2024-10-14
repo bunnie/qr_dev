@@ -79,11 +79,11 @@ def finder_finder_sm(y, line, row_normal=True):
             ratios = []
             denom = sequence[0][0]
             for seq in sequence:
-                ratios.append(seq[0] / denom)
-            LOWER_1 = 0.5
-            UPPER_1 = 2.0
-            LOWER_3 = 2.0
-            UPPER_3 = 4.0
+                ratios.append(int(seq[0] / denom))
+            LOWER_1 = 0 # 0.5 ideally, but have to go to 0 for fixed point impl
+            UPPER_1 = 2
+            LOWER_3 = 2
+            UPPER_3 = 4
             if ratios[1] >= LOWER_1 and ratios[1] <= UPPER_1 and ratios[2] >= LOWER_3 and ratios[2] <= UPPER_3 \
                 and ratios[3] >= LOWER_1 and ratios[3] <= UPPER_1 and ratios[4] >= LOWER_1 and ratios[4] <= UPPER_1:
                 if row_normal:
