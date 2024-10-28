@@ -87,16 +87,16 @@ def finder_finder_sm(y, line, row_normal=True):
             if ratios[1] >= LOWER_1 and ratios[1] <= UPPER_1 and ratios[2] >= LOWER_3 and ratios[2] <= UPPER_3 \
                 and ratios[3] >= LOWER_1 and ratios[3] <= UPPER_1 and ratios[4] >= LOWER_1 and ratios[4] <= UPPER_1:
                 if row_normal:
-                    # print(f"{sequence[2][2]},{y} -- {ratios}")
+                    print(f"{sequence[2][2]},{y} -- {ratios}")
                     candidates.append((sequence[2][2] - sequence[2][0] // 2 - 1, y))
                 else:
-                    # print(f"{y}, {sequence[2][2]} -- {ratios}")
+                    print(f"{y}, {sequence[2][2]} -- {ratios}")
                     candidates.append((y, sequence[2][2] - sequence[2][0] // 2 - 1))
     return candidates
 
 
 if __name__ == "__main__":
-    qr_raw = cv2.imread('images/test0.png')
+    qr_raw = cv2.imread('images/test256b.png')
 
     cv2.imshow('image', qr_raw)
 
@@ -205,3 +205,5 @@ if __name__ == "__main__":
     affined = affine_transform(binary, tform)
     cv2.imshow('affine', affined)
     cv2.waitKey(0)
+
+    # version number extraction
