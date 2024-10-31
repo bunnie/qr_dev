@@ -1,4 +1,4 @@
-use nalgebra::{Matrix3, Vector3, SVD};
+use nalgebra::{Matrix3, SVD, Vector3};
 
 pub type Matrix8x9<T> = nalgebra::Matrix<T, nalgebra::U8, nalgebra::U9, nalgebra::ArrayStorage<T, 8, 9>>;
 
@@ -60,18 +60,4 @@ pub fn apply_homography(homography: &Matrix3<f32>, point: (f32, f32)) -> (f32, f
     // Normalize the homogeneous coordinates
     let w = transformed[2];
     (transformed[0] / w, transformed[1] / w)
-}
-
-/// Function to determine the fourth point of a perfect square given three corners.
-/// Points are represented as tuples (x, y).
-pub fn find_fourth_point(p1: (f32, f32), p2: (f32, f32), p3: (f32, f32)) -> (f32, f32) {
-    let (x1, y1) = p1;
-    let (x2, y2) = p2;
-    let (x3, y3) = p3;
-
-    // Calculate the fourth point
-    let x4 = x1 + x3 - x2;
-    let y4 = y1 + y3 - y2;
-
-    (x4, y4)
 }

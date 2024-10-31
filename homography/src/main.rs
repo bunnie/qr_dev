@@ -40,12 +40,12 @@ fn show_image(flipped_img: &DynamicImage) {
 
 fn main() {
     // Load the PNG file
-    let img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
-
+    let mut img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
+    let dims = img.dimensions();
     // Handle to the luma version for image processing
-    let image = &img;
+    let mut image = &mut img;
     // Create an RGB version for UI debugging
-    let mut rgb_image = RgbImage::new(img.dimensions().0, img.dimensions().1);
+    let mut rgb_image = RgbImage::new(dims.0, dims.1);
     for (x, y, pixel) in image.enumerate_pixels() {
         let luma = pixel[0];
         rgb_image.put_pixel(x, y, Rgb([luma, luma, luma]));
@@ -53,9 +53,9 @@ fn main() {
     let mut drawable_image = &mut rgb_image;
 
     // Get image dimensions and raw pixel data
-    let (width, _height) = img.dimensions();
+    let (width, height) = dims;
     let mut candidates: [Option<Point>; 8] = [None; 8];
-    find_finders(&mut candidates, &image, 128, width as _);
+    let finder_width = find_finders(&mut candidates, &image, 128, width as _) as isize;
 
     const CROSSHAIR_LEN: isize = 3;
     let mut candidates_found = 0;
@@ -70,6 +70,73 @@ fn main() {
         }
     }
 
+    let qr_corners = QrCorners::from_finders(&candidate3, image.dimensions());
+    if let Some(qrc) = qr_corners {
+        let missing_direction = qrc.missing_corner_direction().expect("Unexpected QR code structure");
+        let p4 = estimate_fourth_point(&candidate3);
+        let mut il = ImageLuma::new(&mut image, dims, 128);
+        if let Some(mc) = il.corner_finder(p4, finder_width as usize, missing_direction) {
+            for &p in candidate3.iter().chain([mc].iter()) {
+                let c_screen = p;
+                // flip coordinates to match the camera data
+                // c_screen = Point::new(c_screen.x, drawable_image.dimensions().1 as isize - 1 - c_screen.y);
+                // vertical cross hair
+                glue::line(
+                    &mut drawable_image,
+                    Line::new_with_style(
+                        c_screen + Point::new(0, CROSSHAIR_LEN),
+                        c_screen - Point::new(0, CROSSHAIR_LEN),
+                        DrawStyle::stroke_color(Rgb([0, 255, 0]).into()),
+                    ),
+                    None,
+                    false,
+                );
+                // horizontal cross hair
+                glue::line(
+                    &mut drawable_image,
+                    Line::new_with_style(
+                        c_screen + Point::new(CROSSHAIR_LEN, 0),
+                        c_screen - Point::new(CROSSHAIR_LEN, 0),
+                        DrawStyle::stroke_color(Rgb([0, 255, 0]).into()),
+                    ),
+                    None,
+                    false,
+                );
+            }
+            show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
+        } else {
+            println!("Search started at {:?}, width {}", p4, finder_width);
+            for &p in candidate3.iter().chain([p4].iter()) {
+                let c_screen = p;
+                // flip coordinates to match the camera data
+                // c_screen = Point::new(c_screen.x, drawable_image.dimensions().1 as isize - 1 - c_screen.y);
+                // vertical cross hair
+                glue::line(
+                    &mut drawable_image,
+                    Line::new_with_style(
+                        c_screen + Point::new(0, CROSSHAIR_LEN),
+                        c_screen - Point::new(0, CROSSHAIR_LEN),
+                        DrawStyle::stroke_color(Rgb([255, 0, 0]).into()),
+                    ),
+                    None,
+                    false,
+                );
+                // horizontal cross hair
+                glue::line(
+                    &mut drawable_image,
+                    Line::new_with_style(
+                        c_screen + Point::new(CROSSHAIR_LEN, 0),
+                        c_screen - Point::new(CROSSHAIR_LEN, 0),
+                        DrawStyle::stroke_color(Rgb([255, 0, 0]).into()),
+                    ),
+                    None,
+                    false,
+                );
+            }
+            show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
+        }
+    }
+
     if candidates_found == 3 {
         // Example usage with known three points
         let p1 = candidate3[0].to_f32();
@@ -77,7 +144,8 @@ fn main() {
         let p3 = candidate3[2].to_f32();
 
         // Determine the fourth point
-        let p4 = find_fourth_point(p1, p2, p3);
+        let p4_int = estimate_fourth_point(&candidate3);
+        let p4 = (p4_int.x as f32, p4_int.y as f32);
         println!("The fourth point is: {:?}", p4);
         let dst = [(24.0f32, 24.0f32), (216.0f32, 24.0f32), (216.0f32, 216.0f32), (24.0f32, 216.0f32)];
         let src = [p1, p2, p3, (41.0 + 9.0, 192.0 - 2.0)];
@@ -109,6 +177,14 @@ fn main() {
             );
         }
         show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
+
+        /*
+        // Handle to the luma version for image processing
+        let mut thinning_image = img.clone();
+        zhang_suen_thinning(&mut thinning_image, img.width() as _, img.height() as _, 128);
+        unbinarize_image(&mut thinning_image);
+        show_image(&DynamicImage::ImageLuma8(thinning_image));
+        */
 
         let mut dest_img = RgbImage::new(image.dimensions().0, image.dimensions().1);
         match find_homography(src, dst) {

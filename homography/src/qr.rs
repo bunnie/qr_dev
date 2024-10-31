@@ -1,5 +1,9 @@
-
 const SEQ_LEN: usize = 5;
+use core::cell::RefCell;
+use std::ops::{BitXor, Not};
+
+use nalgebra::QR;
+
 use super::*;
 
 // use fixed point for the maths. This defines where we fix the point at.
@@ -13,7 +17,62 @@ const LOWER_3: usize = 2 << SEQ_FP_SHIFT;
 const UPPER_3: usize = 4 << SEQ_FP_SHIFT;
 
 #[derive(Copy, Clone, Default, Debug)]
-struct FinderSeq {
+pub struct QrCorners {
+    north_west: Option<Point>,
+    north_east: Option<Point>,
+    south_west: Option<Point>,
+    south_east: Option<Point>,
+}
+impl QrCorners {
+    pub fn from_finders(points: &[Point; 3], dimensions: (u32, u32)) -> Option<Self> {
+        let (widthu32, heightu32) = dimensions;
+        let x_half = widthu32 as isize / 2;
+        let y_half = heightu32 as isize / 2;
+
+        let mut qrc = QrCorners::default();
+
+        for &p in points {
+            if p.x < x_half && p.y < y_half {
+                qrc.south_west = Some(p);
+            } else if p.x < x_half && p.y >= y_half {
+                qrc.north_west = Some(p);
+            } else if p.x >= x_half && p.y < y_half {
+                qrc.south_east = Some(p);
+            } else if p.x >= x_half && p.y >= y_half {
+                qrc.north_east = Some(p);
+            }
+        }
+
+        // check that at least three corners are filled
+        if (if qrc.north_west.is_some() { 1 } else { 0 }
+            + if qrc.north_east.is_some() { 1 } else { 0 }
+            + if qrc.south_west.is_some() { 1 } else { 0 }
+            + if qrc.south_east.is_some() { 1 } else { 0 })
+            == 3
+        {
+            Some(qrc)
+        } else {
+            None
+        }
+    }
+
+    pub fn missing_corner_direction(&self) -> Option<SearchDirection> {
+        if self.north_east.is_none() {
+            Some(SearchDirection::NorthEast)
+        } else if self.north_west.is_none() {
+            Some(SearchDirection::NorthWest)
+        } else if self.south_east.is_none() {
+            Some(SearchDirection::SouthEast)
+        } else if self.south_west.is_none() {
+            Some(SearchDirection::SouthWest)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub struct FinderSeq {
     /// run length of the pixels leading up to the current position
     pub run: usize,
     /// the position
@@ -23,7 +82,7 @@ struct FinderSeq {
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum Color {
+pub enum Color {
     Black,
     White,
 }
@@ -32,11 +91,282 @@ impl Color {
         if luminance > thresh { Color::White } else { Color::Black }
     }
 }
+/// Used for counting pixels
+impl Into<usize> for Color {
+    fn into(self) -> usize {
+        match self {
+            Color::Black => 0,
+            Color::White => 1,
+        }
+    }
+}
+/// Used for translating pixels into RGB or Luma color spaces
+impl Into<u8> for Color {
+    fn into(self) -> u8 {
+        match self {
+            Color::Black => 0,
+            Color::White => 255,
+        }
+    }
+}
 impl Default for Color {
     fn default() -> Self { Color::Black }
 }
 
-struct SeqBuffer {
+impl Not for Color {
+    type Output = Color;
+
+    fn not(self) -> Self::Output {
+        match self {
+            Color::Black => Color::White,
+            Color::White => Color::Black,
+        }
+    }
+}
+
+impl BitXor for Color {
+    type Output = Color;
+
+    fn bitxor(self, rhs: Self) -> Self::Output { if self == rhs { self } else { !self } }
+}
+
+/// (0, 0) is at the lower left corner
+pub struct ImageLuma<'a> {
+    data: &'a mut [u8],
+    width: usize,
+    height: usize,
+    thresh: u8,
+    // coordinates of a subimage, if set. The ROI includes these points.
+    x0: usize,
+    x1: usize,
+    y0: usize,
+    y1: usize,
+    iter_row: RefCell<usize>,
+}
+impl<'a> ImageLuma<'a> {
+    pub fn new(data: &'a mut [u8], dimensions: (u32, u32), thresh: u8) -> Self {
+        let (w, h) = dimensions;
+        // ROI is default the entire area
+        Self {
+            data,
+            width: w as usize,
+            height: h as usize,
+            thresh,
+            x0: 0,
+            x1: w as usize,
+            y0: 0,
+            y1: h as usize,
+            iter_row: RefCell::new(0),
+        }
+    }
+
+    pub fn dimensions(&self) -> (usize, usize) { (self.width, self.height) }
+
+    pub fn set_thresh(&mut self, t: u8) { self.thresh = t }
+
+    pub fn binarize(&self, luma: u8) -> Color { if luma > self.thresh { Color::White } else { Color::Black } }
+
+    pub fn get_pixel(&self, x: usize, y: usize) -> u8 { self.data[x + y * self.width] }
+
+    pub fn put_pixel(&mut self, x: usize, y: usize, luma: u8) {
+        self.data[x + y * self.width as usize] = luma;
+    }
+
+    pub fn is_four_connected(&self, p: Point) -> bool {
+        if p.x < 1 || p.x >= self.width as isize - 2 || p.y > 1 || p.y >= self.height as isize - 2 {
+            false
+        } else {
+            let xu = p.x as usize;
+            let yu = p.y as usize;
+            let color = self.get_pixel(xu, yu) <= self.thresh;
+            !((self.get_pixel(xu - 1, yu) <= self.thresh) ^ color
+                || (self.get_pixel(xu, yu - 1) <= self.thresh) ^ color
+                || (self.get_pixel(xu + 1, yu) <= self.thresh) ^ color
+                || (self.get_pixel(xu, yu + 1) <= self.thresh) ^ color)
+        }
+    }
+
+    pub fn set_roi(&mut self, tl: Point, br: Point) {
+        assert!(tl.x >= 0);
+        assert!(tl.y >= 0);
+        assert!(br.x >= 0);
+        assert!(br.y >= 0);
+        self.x0 = tl.x as usize;
+        self.x1 = br.x as usize;
+        self.y0 = br.y as usize;
+        self.y1 = tl.y as usize;
+        *self.iter_row.borrow_mut() = 0;
+    }
+
+    pub fn reset_roi(&self) { *self.iter_row.borrow_mut() = 0; }
+
+    pub fn next_roi_row(&'a self) -> Option<(usize, &'a [u8])> {
+        let cur_row = *self.iter_row.borrow();
+        if cur_row <= self.y1 - self.y0 {
+            *self.iter_row.borrow_mut() = *self.iter_row.borrow() + 1;
+            Some((
+                cur_row,
+                &self.data
+                    [(self.y0 + cur_row) * self.width + self.x0..(self.y0 + cur_row) * self.width + self.x1],
+            ))
+        } else {
+            None
+        }
+    }
+
+    pub fn get_roi_row(&'a self, roi_row: usize) -> Option<&'a [u8]> {
+        if roi_row <= self.y1 - self.y0 {
+            Some(
+                &self.data
+                    [(self.y0 + roi_row) * self.width + self.x0..(self.y0 + roi_row) * self.width + self.x1],
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn roi_width(&self) -> usize { self.x1 - self.x0 }
+
+    pub fn roi_height(&self) -> usize { self.y1 - self.y0 }
+
+    fn to_count(&self, x: isize, y: isize, color: Color) -> usize {
+        // println!("x: {} y: {}, result: {}, len: {}", x, y, y * self.width as isize + x, self.data.len());
+        (!self.binarize(self.data[(y * (self.width as isize) + x).min(0) as usize]) ^ color).into()
+    }
+
+    pub fn neighbor_count(&self, point: Point, color: Color) -> Option<usize> {
+        let x = point.x;
+        let y = point.y;
+        if x > 0 && x < (self.width - 1) as isize && y > 0 && y < (self.height - 1) as isize {
+            // Count 8 neighbors
+            let mut count: usize = 0;
+            for direction in SearchDirection::iter() {
+                let p: Point = direction.into();
+                count += self.to_count(x as isize + p.x, y as isize + p.y, color);
+            }
+            Some(count)
+        } else {
+            None
+        }
+    }
+
+    /// This transforms ROI coordinates into image coordinates
+    pub fn neighbor_count_roi(&self, point: Point, color: Color) -> Option<usize> {
+        self.neighbor_count(self.roi_to_absolute(point).unwrap(), color)
+    }
+
+    pub fn roi_to_absolute(&self, point: Point) -> Option<Point> {
+        let x = point.x + self.x0 as isize;
+        let y = point.y + self.y0 as isize;
+        if x >= 0 && x < self.width as isize && y >= 0 && y < self.height as isize {
+            Some(Point::new(x, y))
+        } else {
+            None
+        }
+    }
+
+    pub fn absolute_to_roi(&self, point: Point) -> Option<Point> {
+        let x = point.x - self.x0 as isize;
+        let y = point.y - self.y0 as isize;
+        if x >= 0 && x < self.x1 as isize && y >= 0 && y < self.y1 as isize {
+            Some(Point::new(x, y))
+        } else {
+            None
+        }
+    }
+
+    /// Find the corner of a finder.
+    pub fn corner_finder(
+        // must have an ROI set
+        &mut self,
+        // this point needs to be transformed to the center of the ROI
+        center: Point,
+        // putative width of the finder
+        finder_width: usize,
+        // the expected direction of the corner
+        corner_dir: SearchDirection,
+        // returns the Point in absolute image offset
+    ) -> Option<Point> {
+        let search_dir: Point = corner_dir.into();
+        let tl = Point::new(
+            (center.x - (finder_width / 2 + finder_width / 7) as isize).max(0),
+            (center.y + (finder_width / 2 + finder_width / 7) as isize).min(self.height as isize),
+        );
+        let br = Point::new(
+            (center.x + (finder_width / 2 + finder_width / 7) as isize).min(self.width as isize),
+            (center.y - (finder_width / 2 + finder_width / 7) as isize).max(0),
+        );
+        self.set_roi(tl, br);
+        let center = self.absolute_to_roi(center).expect("starting point is outside the ROI");
+
+        // check that we were given a *corner*, not a cardinal
+        assert!(search_dir.x != 0);
+        assert!(search_dir.y != 0);
+        // figure out which edge of the ROI we're starting the search from;
+        // set the starting point to be one pixel beyond the edge.
+        let start_x = if search_dir.x < 0 { 1 } else { self.roi_width() - 1 };
+
+        // threshold for determining that we found an edge
+        const EDGE_THRESH: usize = 5;
+
+        // start searching on the row intersecting the starting point
+        let mut candidate: Point = Point::new(0, 0);
+        let mut found_candidate = false;
+
+        for x in 0..start_x.max(self.roi_width()) as isize {
+            let candidate_count = self
+                .neighbor_count_roi(Point::new(start_x as isize + x * -search_dir.x, center.y), Color::White);
+            let abs_pt = self.roi_to_absolute(Point::new(start_x as isize + x * -search_dir.x, center.y));
+            println!("{:?} -> {:?}", abs_pt, candidate_count);
+            if let Some(cc) = candidate_count {
+                if cc <= EDGE_THRESH {
+                    candidate.x = start_x as isize + x * -search_dir.x;
+                    candidate.y = center.y;
+                    found_candidate = true;
+                    break;
+                }
+            }
+        }
+        if !found_candidate {
+            println!("Finder expansion did not encounter a finder edge on initial search");
+            return None;
+        } else {
+            println!("starting search at {:?}", candidate);
+        }
+
+        // follow the line in the search direction until we find no alternatives
+        let directions = [Point::new(0, search_dir.y), search_dir, Point::new(-search_dir.x, search_dir.y)];
+        let mut next_candidate = None;
+        loop {
+            for dir in directions {
+                if let Some(cc) = self.neighbor_count_roi(candidate + dir, Color::White) {
+                    if cc <= EDGE_THRESH {
+                        next_candidate = Some(candidate + dir);
+                        println!("Found {:?} in {:?}", candidate + dir, dir);
+                        break;
+                    }
+                };
+            }
+            if let Some(c) = next_candidate.take() {
+                candidate = c;
+            } else {
+                break;
+            }
+        }
+        // If the search didn't terminate at an edge of the ROI, the candidate is the corner point.
+        if candidate.x != 0
+            && candidate.x != self.roi_width() as isize
+            && candidate.y != 0
+            && candidate.y != self.roi_height() as isize
+        {
+            self.roi_to_absolute(candidate)
+        } else {
+            None
+        }
+    }
+}
+
+pub struct SeqBuffer {
     buffer: [Option<FinderSeq>; 5],
     start: usize,
     end: usize,
@@ -86,7 +416,8 @@ impl SeqBuffer {
         copied_count
     }
 
-    pub fn search(&self) -> Option<usize> {
+    // returns a tuple of (center point of the sequence, total length of sequence)
+    pub fn search(&self) -> Option<(usize, usize)> {
         let mut ratios = [0usize; SEQ_LEN];
         let mut seq: [FinderSeq; SEQ_LEN] = [FinderSeq::default(); SEQ_LEN];
         if self.retrieve(&mut seq) == SEQ_LEN {
@@ -108,7 +439,7 @@ impl SeqBuffer {
                 {
                     // crate::println!("  seq {:?}", &seq);
                     // crate::println!("  ratios {:?}", &ratios);
-                    Some(seq[2].pos - seq[2].run / 2 - 1)
+                    Some((seq[2].pos - seq[2].run / 2 - 1, seq.iter().map(|s| s.run).sum()))
                 } else {
                     None
                 }
@@ -122,7 +453,8 @@ impl SeqBuffer {
 }
 
 const ROW_LIMIT: usize = 128;
-pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, stride: usize) {
+/// Returns the average width of the finder regions found.
+pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, stride: usize) -> usize {
     let mut row_candidates: [Option<Point>; ROW_LIMIT] = [None; ROW_LIMIT];
 
     // ideally, the candidates would be a Vec, but we want this to work without allocations
@@ -147,7 +479,7 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
                 run_length = 1;
 
                 // manage the sequence index
-                if let Some(pos) = seq_buffer.search() {
+                if let Some((pos, _width)) = seq_buffer.search() {
                     // crate::println!("row candidate {}, {}", pos, y);
                     row_candidates[row_candidate_index] = Some(Point::new(pos as _, y as _));
                     row_candidate_index += 1;
@@ -166,11 +498,14 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
 
     // crate::println!("CCCCCCCCCCCCCCCC");
     let mut candidate_index = 0;
+    let mut candidate_width = 0;
     for x in 0..stride {
         seq_buffer.clear();
 
         let mut last_color = Color::from(image[x], thresh);
         let mut run_length = 1;
+        // could rewrite this to abort the search after more than 3 finders are found, but for now,
+        // do an exhaustive search because it's useful info for debugging.
         for (y_minus1, row) in image[x + stride..].chunks(stride).enumerate() {
             let pix = Color::from(row[0], thresh);
             if pix == last_color {
@@ -179,7 +514,7 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
                 seq_buffer.push(FinderSeq { run: run_length, pos: y_minus1 + 1, color: last_color });
                 last_color = pix;
                 run_length = 1;
-                if let Some(pos) = seq_buffer.search() {
+                if let Some((pos, width)) = seq_buffer.search() {
                     let search_point = Point::new(x as _, pos as _);
                     // crate::println!("col candidate {}, {}", x, pos);
 
@@ -191,6 +526,7 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
                         if candidate_index < candidates.len() {
                             candidates[candidate_index] = rc;
                             candidate_index += 1;
+                            candidate_width += width;
                         } else {
                             // just abort the search if we run out of space to store results
                             break;
@@ -205,4 +541,189 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
             }
         }
     }
+    candidate_width / candidate_index
+}
+
+pub enum SearchDirection {
+    North,
+    NorthWest,
+    NorthEast,
+    West,
+    East,
+    South,
+    SouthWest,
+    SouthEast,
+}
+impl Into<Point> for SearchDirection {
+    fn into(self) -> Point {
+        use SearchDirection::*;
+        match self {
+            North => Point::new(0, 1),
+            West => Point::new(-1, 0),
+            East => Point::new(1, 0),
+            South => Point::new(0, -1),
+            NorthWest => Point::new(-1, 1),
+            NorthEast => Point::new(1, 1),
+            SouthWest => Point::new(-1, -1),
+            SouthEast => Point::new(1, -1),
+        }
+    }
+}
+
+pub struct SearchDirectionIter {
+    index: usize,
+}
+
+impl SearchDirection {
+    pub fn iter() -> SearchDirectionIter { SearchDirectionIter { index: 0 } }
+}
+
+impl Iterator for SearchDirectionIter {
+    type Item = SearchDirection;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let direction = match self.index {
+            0 => Some(SearchDirection::North),
+            1 => Some(SearchDirection::NorthWest),
+            2 => Some(SearchDirection::NorthEast),
+            3 => Some(SearchDirection::West),
+            4 => Some(SearchDirection::East),
+            5 => Some(SearchDirection::South),
+            6 => Some(SearchDirection::SouthWest),
+            7 => Some(SearchDirection::SouthEast),
+            _ => None,
+        };
+        self.index += 1;
+        direction
+    }
+}
+
+/// Function to estimate the fourth point from three points. The result is not exact
+/// because we don't know the obliqueness of the camera plane with respect to the image.
+pub fn estimate_fourth_point(points: &[Point; 3]) -> Point {
+    let x4 = points[0].x + points[2].x - points[1].x;
+    let y4 = points[0].y + points[2].y - points[1].y;
+
+    Point::new(x4, y4)
+}
+
+/// Performs Zhang-Suen Thinning on a binary image represented as a slice of u8.
+/// The input image is modified in-place.
+///
+/// # Arguments
+/// - `image`: A mutable slice of `u8` representing the binary image (0 or 1).
+/// - `width`: The width of the image.
+/// - `height`: The height of the image.
+/// - `threshold`: Threshold value to binarize the image. Pixels >= threshold are set to 1, others to 0.
+pub fn zhang_suen_thinning(image: &mut [u8], width: usize, height: usize, threshold: u8) {
+    // Binarize the image using the given threshold
+    binarize_image(image, threshold);
+
+    // Prepare to iterate until no changes are made
+    let mut has_changes = true;
+
+    while has_changes {
+        has_changes = false;
+
+        // First Sub-iteration
+        let mut markers = vec![0u8; image.len()]; // 0: keep, 1: delete
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let idx = y * width + x;
+                if image[idx] == 1 && should_remove_pixel(image, x, y, width, true) {
+                    markers[idx] = 1;
+                    has_changes = true;
+                }
+            }
+        }
+
+        let mut debug = markers.clone();
+        unbinarize_image(&mut debug);
+        show_image(&DynamicImage::ImageLuma8(GrayImage::from_vec(width as _, height as _, debug).unwrap()));
+
+        // Remove marked pixels
+        for (i, &marker) in markers.iter().enumerate() {
+            if marker == 1 {
+                image[i] = 0;
+            }
+        }
+
+        // Second Sub-iteration
+        let mut markers = vec![0u8; image.len()];
+        for y in 1..(height - 1) {
+            for x in 1..(width - 1) {
+                let idx = y * width + x;
+                if image[idx] == 1 && should_remove_pixel(image, x, y, width, false) {
+                    markers[idx] = 1;
+                    has_changes = true;
+                }
+            }
+        }
+
+        // Remove marked pixels
+        for (i, &marker) in markers.iter().enumerate() {
+            if marker == 1 {
+                image[i] = 0;
+            }
+        }
+    }
+}
+
+/// Binarizes the image based on a threshold.
+fn binarize_image(image: &mut [u8], threshold: u8) {
+    for pixel in image.iter_mut() {
+        *pixel = if *pixel >= threshold { 1 } else { 0 };
+    }
+}
+
+pub fn unbinarize_image(image: &mut [u8]) {
+    for pixel in image.iter_mut() {
+        *pixel = if *pixel != 0 { 255 } else { 0 };
+    }
+}
+
+/// Checks if a pixel should be removed according to the Zhang-Suen criteria.
+/// `is_first_iteration` indicates whether it's the first or second sub-iteration.
+fn should_remove_pixel(image: &[u8], x: usize, y: usize, width: usize, is_first_iteration: bool) -> bool {
+    let idx = y * width + x;
+
+    // Get 8 neighbors
+    let p2 = image[(y - 1) * width + x]; // north
+    let p3 = image[(y - 1) * width + (x + 1)]; // northeast
+    let p4 = image[y * width + (x + 1)]; // east
+    let p5 = image[(y + 1) * width + (x + 1)]; // southeast
+    let p6 = image[(y + 1) * width + x]; // south
+    let p7 = image[(y + 1) * width + (x - 1)]; // southwest
+    let p8 = image[y * width + (x - 1)]; // west
+    let p9 = image[(y - 1) * width + (x - 1)]; // northwest
+
+    // Compute the number of non-zero neighbors
+    let non_zero_count = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
+
+    // Count the number of 0 to 1 transitions in the sequence P2 -> P3 -> P4 -> P5 -> P6 -> P7 -> P8 -> P9 ->
+    // P2
+    let transitions = count_transitions(&[p2, p3, p4, p5, p6, p7, p8, p9, p2]);
+
+    // Conditions
+    if non_zero_count >= 2
+        && non_zero_count <= 6
+        && transitions == 1
+        && (is_first_iteration && (p2 * p4 * p6 == 0) && (p4 * p6 * p8 == 0))
+        || (!is_first_iteration && (p2 * p4 * p8 == 0) && (p2 * p6 * p8 == 0))
+    {
+        return true;
+    }
+
+    false
+}
+
+/// Counts the number of 0 to 1 transitions in the given neighborhood sequence.
+fn count_transitions(neighbors: &[u8]) -> u8 {
+    let mut count = 0;
+    for i in 0..neighbors.len() - 1 {
+        if neighbors[i] == 0 && neighbors[i + 1] == 1 {
+            count += 1;
+        }
+    }
+    count
 }
