@@ -38,6 +38,7 @@ fn show_image(flipped_img: &DynamicImage) {
     }
 }
 
+const BW_THRESH: u8 = 128;
 fn main() {
     // Load the PNG file
     let mut img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
@@ -55,7 +56,7 @@ fn main() {
     // Get image dimensions and raw pixel data
     let (width, height) = dims;
     let mut candidates: [Option<Point>; 8] = [None; 8];
-    let finder_width = find_finders(&mut candidates, &image, 128, width as _) as isize;
+    let finder_width = find_finders(&mut candidates, &image, BW_THRESH, width as _) as isize;
 
     const CROSSHAIR_LEN: isize = 3;
     let mut candidates_found = 0;
@@ -74,8 +75,9 @@ fn main() {
     if let Some(qrc) = qr_corners {
         let missing_direction = qrc.missing_corner_direction().expect("Unexpected QR code structure");
         let p4 = estimate_fourth_point(&candidate3);
-        let mut il = ImageLuma::new(&mut image, dims, 128);
-        if let Some(mc) = il.corner_finder(p4, finder_width as usize, missing_direction) {
+        let mut il = ImageLuma::new(&mut image, dims, BW_THRESH);
+        if let Some(mc) = il.corner_finder(p4, finder_width as usize - 2, missing_direction) {
+            drawable_image.iter_mut().for_each(|p| *p = if *p < BW_THRESH { 0 } else { 255 });
             for &p in candidate3.iter().chain([mc].iter()) {
                 let c_screen = p;
                 // flip coordinates to match the camera data
@@ -181,7 +183,7 @@ fn main() {
         /*
         // Handle to the luma version for image processing
         let mut thinning_image = img.clone();
-        zhang_suen_thinning(&mut thinning_image, img.width() as _, img.height() as _, 128);
+        zhang_suen_thinning(&mut thinning_image, img.width() as _, img.height() as _, BW_THRESH);
         unbinarize_image(&mut thinning_image);
         show_image(&DynamicImage::ImageLuma8(thinning_image));
         */
