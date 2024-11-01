@@ -2,7 +2,7 @@ const SEQ_LEN: usize = 5;
 use core::cell::RefCell;
 use std::ops::{BitXor, Not};
 
-use nalgebra::QR;
+use nalgebra::{QR, base, indexing};
 
 use super::*;
 
@@ -127,9 +127,132 @@ impl Not for Color {
 impl BitXor for Color {
     type Output = Color;
 
-    fn bitxor(self, rhs: Self) -> Self::Output { if self == rhs { self } else { !self } }
+    fn bitxor(self, rhs: Self) -> Self::Output { if self == rhs { Color::Black } else { Color::White } }
 }
 
+#[derive(Copy, Clone, Debug)]
+pub enum SearchDirection {
+    North,
+    NorthWest,
+    NorthEast,
+    West,
+    East,
+    South,
+    SouthWest,
+    SouthEast,
+}
+impl Into<Point> for SearchDirection {
+    fn into(self) -> Point {
+        use SearchDirection::*;
+        match self {
+            North => Point::new(0, 1),
+            West => Point::new(-1, 0),
+            East => Point::new(1, 0),
+            South => Point::new(0, -1),
+            NorthWest => Point::new(-1, 1),
+            NorthEast => Point::new(1, 1),
+            SouthWest => Point::new(-1, -1),
+            SouthEast => Point::new(1, -1),
+        }
+    }
+}
+
+pub struct SearchDirectionIter {
+    index: usize,
+}
+
+impl SearchDirection {
+    pub fn iter() -> SearchDirectionIter { SearchDirectionIter { index: 0 } }
+}
+
+impl Iterator for SearchDirectionIter {
+    type Item = SearchDirection;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let direction = match self.index {
+            0 => Some(SearchDirection::North),
+            1 => Some(SearchDirection::NorthWest),
+            2 => Some(SearchDirection::NorthEast),
+            3 => Some(SearchDirection::West),
+            4 => Some(SearchDirection::East),
+            5 => Some(SearchDirection::South),
+            6 => Some(SearchDirection::SouthWest),
+            7 => Some(SearchDirection::SouthEast),
+            _ => None,
+        };
+        self.index += 1;
+        direction
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum TrendDirection {
+    Positive,
+    None,
+    Negative,
+}
+impl From<isize> for TrendDirection {
+    fn from(value: isize) -> Self {
+        if value > 0 {
+            TrendDirection::Positive
+        } else if value < 0 {
+            TrendDirection::Negative
+        } else {
+            TrendDirection::None
+        }
+    }
+}
+impl Into<isize> for TrendDirection {
+    fn into(self) -> isize {
+        match self {
+            TrendDirection::Positive => 1,
+            TrendDirection::None => 0,
+            TrendDirection::Negative => -1,
+        }
+    }
+}
+
+/// Doesn't need to be too big, because the overall area is at most 256, and
+/// we pay a performance penalty to zeroize unused space.
+const TREND_LEN: usize = 64;
+#[derive(Debug)]
+pub struct Trend {
+    data: [usize; TREND_LEN],
+    index: usize,
+    greater: isize,
+    lesser: isize,
+    last: usize,
+}
+impl Trend {
+    pub fn new() -> Self { Self { data: [0usize; TREND_LEN], index: 0, greater: 0, lesser: 0, last: 0 } }
+
+    pub fn push(&mut self, value: usize) -> TrendDirection {
+        self.data[self.index] = value;
+        let ret = if self.index == 0 {
+            self.last = value;
+            TrendDirection::None
+        } else {
+            if value > self.last {
+                self.greater += 1;
+                TrendDirection::Positive
+            } else if value < self.last {
+                self.lesser += 1;
+                TrendDirection::Negative
+            } else {
+                TrendDirection::None
+            }
+        };
+        self.index += 1;
+        assert!(self.index < TREND_LEN, "Increase FUZZY_LEN");
+        ret
+    }
+
+    /// Returns positive, zero, or negative value based on the trend of the values recorded
+    pub fn trend(&self) -> TrendDirection { (self.greater - self.lesser).into() }
+
+    /// Size of the trend. The sign does not matter.
+    pub fn magnitude(&self) -> usize { (self.greater - self.lesser).abs() as usize }
+}
 /// (0, 0) is at the lower left corner
 pub struct ImageLuma<'a> {
     data: &'a mut [u8],
@@ -203,7 +326,7 @@ impl<'a> ImageLuma<'a> {
     pub fn next_roi_row(&'a self) -> Option<(usize, &'a [u8])> {
         let cur_row = *self.iter_row.borrow();
         if cur_row <= self.y1 - self.y0 {
-            *self.iter_row.borrow_mut() = *self.iter_row.borrow() + 1;
+            *self.iter_row.borrow_mut() = cur_row + 1;
             Some((
                 cur_row,
                 &self.data
@@ -229,9 +352,21 @@ impl<'a> ImageLuma<'a> {
 
     pub fn roi_height(&self) -> usize { self.y1 - self.y0 }
 
+    /// Return 1 if the pixel at x, y matches color; otherwise, 0
     fn to_count(&self, x: isize, y: isize, color: Color) -> usize {
-        // println!("x: {} y: {}, result: {}, len: {}", x, y, y * self.width as isize + x, self.data.len());
-        (!self.binarize(self.data[(y * (self.width as isize) + x).min(0) as usize]) ^ color).into()
+        let index = (y * (self.width as isize) + x).max(0) as usize;
+        /*
+        println!(
+            "x: {} y: {}, result: {}, len: {}, pix {:?}, color: {:?}, result: {:?}",
+            x,
+            y,
+            index,
+            self.data.len(),
+            self.binarize(self.data[index]),
+            color,
+            !(self.binarize(self.data[index]) ^ color)
+        ); */
+        (!(self.binarize(self.data[index]) ^ color)).into()
     }
 
     pub fn neighbor_count(&self, point: Point, color: Color) -> Option<usize> {
@@ -287,7 +422,12 @@ impl<'a> ImageLuma<'a> {
         corner_dir: SearchDirection,
         // returns the Point in absolute image offset
     ) -> Option<Point> {
+        // constrain our search area to a smaller ROI.
         let search_dir: Point = corner_dir.into();
+        // check that we were given a *corner*, not a cardinal
+        assert!(search_dir.x != 0);
+        assert!(search_dir.y != 0);
+
         let tl = Point::new(
             (center.x - (finder_width / 2 + finder_width / 7) as isize).max(0),
             (center.y + (finder_width / 2 + finder_width / 7) as isize).min(self.height as isize),
@@ -297,69 +437,67 @@ impl<'a> ImageLuma<'a> {
             (center.y - (finder_width / 2 + finder_width / 7) as isize).max(0),
         );
         self.set_roi(tl, br);
-        let center = self.absolute_to_roi(center).expect("starting point is outside the ROI");
 
-        // check that we were given a *corner*, not a cardinal
-        assert!(search_dir.x != 0);
-        assert!(search_dir.y != 0);
         // figure out which edge of the ROI we're starting the search from;
         // set the starting point to be one pixel beyond the edge.
         let start_x = if search_dir.x < 0 { 1 } else { self.roi_width() - 1 };
 
-        // threshold for determining that we found an edge
-        const EDGE_THRESH: usize = 5;
+        // set candidate at the extreme end of the search range (opposite corner of search direction)
+        let mut candidate_roi = Point::new(
+            if search_dir.x < 0 { self.roi_width() as isize - 1 } else { 1 },
+            // if search_dir.y < 0 { 1 } else { self.roi_height() as isize - 1 },
+            0,
+        );
 
-        // start searching on the row intersecting the starting point
-        let mut candidate: Point = Point::new(0, 0);
-        let mut found_candidate = false;
+        // threshold for determining that a pixel should be counted
+        const EDGE_THRESH: usize = 3;
 
-        for x in 0..start_x.max(self.roi_width()) as isize {
-            let candidate_count = self
-                .neighbor_count_roi(Point::new(start_x as isize + x * -search_dir.x, center.y), Color::White);
-            let abs_pt = self.roi_to_absolute(Point::new(start_x as isize + x * -search_dir.x, center.y));
-            println!("{:?} -> {:?}", abs_pt, candidate_count);
-            if let Some(cc) = candidate_count {
-                if cc <= EDGE_THRESH {
-                    candidate.x = start_x as isize + x * -search_dir.x;
-                    candidate.y = center.y;
-                    found_candidate = true;
-                    break;
-                }
-            }
-        }
-        if !found_candidate {
-            println!("Finder expansion did not encounter a finder edge on initial search");
-            return None;
-        } else {
-            println!("starting search at {:?}", candidate);
-        }
-
-        // follow the line in the search direction until we find no alternatives
-        let directions = [Point::new(0, search_dir.y), search_dir, Point::new(-search_dir.x, search_dir.y)];
-        let mut next_candidate = None;
-        loop {
-            for dir in directions {
-                if let Some(cc) = self.neighbor_count_roi(candidate + dir, Color::White) {
-                    if cc <= EDGE_THRESH {
-                        next_candidate = Some(candidate + dir);
-                        println!("Found {:?} in {:?}", candidate + dir, dir);
+        // search past the inflection point by the estimated width of a QR row
+        let symbol_width = finder_width / (1 + 1 + 3 + 1 + 1).max(1);
+        let mut trend = Trend::new();
+        let mut last_dir = TrendDirection::None;
+        let mut significance: usize = 0;
+        let mut early_quit = false;
+        while let Some((y, row)) = self.next_roi_row() {
+            for i in 1..row.len() - 1 {
+                let x = (start_x as isize + i as isize * -search_dir.x) as usize;
+                if self.binarize(row[x]) == Color::Black {
+                    if self.neighbor_count_roi(Point::new(x as isize, y as isize), Color::Black).unwrap()
+                        >= EDGE_THRESH
+                    {
+                        let dir = trend.push(x);
+                        if dir != last_dir {
+                            if candidate_roi.x * search_dir.x < i as isize * search_dir.x {
+                                candidate_roi.x = i as isize;
+                            }
+                            if candidate_roi.y * search_dir.y < y as isize * search_dir.y {
+                                candidate_roi.y = y as isize;
+                            }
+                            last_dir = dir;
+                            // declining trend
+                            if trend.magnitude() + symbol_width < significance {
+                                early_quit = true;
+                            }
+                        }
+                        if trend.magnitude() > significance {
+                            significance = trend.magnitude();
+                        }
                         break;
                     }
-                };
+                }
             }
-            if let Some(c) = next_candidate.take() {
-                candidate = c;
-            } else {
+            if early_quit {
                 break;
             }
         }
+
         // If the search didn't terminate at an edge of the ROI, the candidate is the corner point.
-        if candidate.x != 0
-            && candidate.x != self.roi_width() as isize
-            && candidate.y != 0
-            && candidate.y != self.roi_height() as isize
+        if candidate_roi.x != 0
+            && candidate_roi.x != self.roi_width() as isize
+            && candidate_roi.y != 0
+            && candidate_roi.y != self.roi_height() as isize
         {
-            self.roi_to_absolute(candidate)
+            self.roi_to_absolute(candidate_roi)
         } else {
             None
         }
@@ -542,60 +680,6 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
         }
     }
     candidate_width / candidate_index
-}
-
-pub enum SearchDirection {
-    North,
-    NorthWest,
-    NorthEast,
-    West,
-    East,
-    South,
-    SouthWest,
-    SouthEast,
-}
-impl Into<Point> for SearchDirection {
-    fn into(self) -> Point {
-        use SearchDirection::*;
-        match self {
-            North => Point::new(0, 1),
-            West => Point::new(-1, 0),
-            East => Point::new(1, 0),
-            South => Point::new(0, -1),
-            NorthWest => Point::new(-1, 1),
-            NorthEast => Point::new(1, 1),
-            SouthWest => Point::new(-1, -1),
-            SouthEast => Point::new(1, -1),
-        }
-    }
-}
-
-pub struct SearchDirectionIter {
-    index: usize,
-}
-
-impl SearchDirection {
-    pub fn iter() -> SearchDirectionIter { SearchDirectionIter { index: 0 } }
-}
-
-impl Iterator for SearchDirectionIter {
-    type Item = SearchDirection;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let direction = match self.index {
-            0 => Some(SearchDirection::North),
-            1 => Some(SearchDirection::NorthWest),
-            2 => Some(SearchDirection::NorthEast),
-            3 => Some(SearchDirection::West),
-            4 => Some(SearchDirection::East),
-            5 => Some(SearchDirection::South),
-            6 => Some(SearchDirection::SouthWest),
-            7 => Some(SearchDirection::SouthEast),
-            _ => None,
-        };
-        self.index += 1;
-        direction
-    }
 }
 
 /// Function to estimate the fourth point from three points. The result is not exact
