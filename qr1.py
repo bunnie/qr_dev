@@ -3,9 +3,23 @@ import numpy as np
 
 from ref_images import *
 from math import atan2, cos, sin
+from homography import *
 
 FIXED_POINT_SHIFT = 16
 FIXED_POINT_ONE = 1 << FIXED_POINT_SHIFT
+
+def draw_cross(image, point, color):
+    cv2.line(image, (point[0] - 2, point[1]), (point[0] + 2, point[1]), color, 1)
+    cv2.line(image, (point[0], point[1] - 2), (point[0], point[1] + 2), color, 1)
+
+def pt_from_hv_line(hline, vline):
+    (m1, b1) = hline
+    (m2v, b2v) = vline
+    m2 = 1 / m2v
+    b2 = - b2v / m2v
+    x = (b2 - b1) / (m1 - m2)
+    y = m1 * x + b1
+    return (int(x), int(y))
 
 class SearchDirection:
     def __init__(self, point, shape):
@@ -18,6 +32,7 @@ class SearchDirection:
             self.direction = "nw"
         if point[0] > shape[1] // 2 and point[1] > shape[0] // 2:
             self.direction = "ne"
+        self.shape = shape
 
     def as_int(self):
         if self.direction == "sw":
@@ -29,36 +44,28 @@ class SearchDirection:
         elif self.direction == "ne":
             return (1, 1)
 
-    def normalize_row(self, row):
-        if self.as_int()[1] > 1:
-            if self.as_int()[0] > 1:
-                return row
-            else:
-                return reversed(row)
-        else:
-            if self.as_int()[0] > 1:
-                return reversed(row)
-            else:
-                return row
-
-    def normalize_col(self, col):
-        if self.as_int()[1] > 1:
-            return reversed(col)
-        else:
-            return col
-
     def center_point(self):
         return self.point
 
-    def denorm_offset(self, p, shape):
-        if self.direction == "sw":
-            return (shape[1] - p[0], shape[0] - p[1])
-        elif self.direction == "se":
-            return (p[0], shape[0] - p[1])
-        elif self.direction == "nw":
-            return (shape[1] - p[0], p[1])
+    def inline_with(self, query):
+        # self is the missing point
+        if self.direction[0] in query.direction:
+            return "h"
+        elif self.direction[1] in query.direction:
+            return "v"
+        else:
+            return None
+
+    def dest_point(self, margin = 4):
+        if self.direction == "nw":
+            return (margin, self.shape[0] - margin)
         elif self.direction == "ne":
-            return (p[0], p[1])
+            return (self.shape[1] - margin, self.shape[0] - margin)
+        elif self.direction == "sw":
+            return (margin, margin)
+        elif self.direction == "se":
+            return (self.shape[1] - margin, margin)
+        return None
 
 def best_fit_line_with_outlier_rejection(points, threshold=1.0, max_iterations=10):
     # Step 1: Initial least-squares fit
@@ -291,8 +298,7 @@ if __name__ == "__main__":
     finder_width = int(finder_width / len(marks))
     finder_width += (max(int(finder_width / (1+1+3+1+1)), 1) + 2)
     estimated_point = (marks[0][0] + marks[2][0] - marks[1][0], marks[0][1] + marks[2][1] - marks[1][1])
-    cv2.line(intersected, (estimated_point[0] - 2, estimated_point[1]), (estimated_point[0] + 2, estimated_point[1]), (255, 255, 0), 1)
-    cv2.line(intersected, (estimated_point[0], estimated_point[1] - 2), (estimated_point[0], estimated_point[1] + 2), (255, 255, 0), 1)
+    draw_cross(intersected, estimated_point, (255, 255, 0))
 
     blended_intersection = cv2.addWeighted(intersected, 1.0, rgb, 0.5, 0)
     if False:
@@ -304,8 +310,15 @@ if __name__ == "__main__":
     directions = []
     for c in marks:
         directions += [SearchDirection(c, qr_raw.shape)]
+    missing_direction = SearchDirection(estimated_point, qr_raw.shape)
+    missing_vline = None
+    missing_hline = None
+    pts = []
+    dest_pts = []
+    MARGIN = 20
 
     for dir in directions:
+        extraction = missing_direction.inline_with(dir)
         signs = dir.as_int()
         point = dir.center_point()
         cv2.rectangle(intersected,
@@ -314,7 +327,7 @@ if __name__ == "__main__":
                     (255, 255, 0), 1)
 
         roi = binary[
-             point[1] - finder_width // 2 : point[1] + finder_width // 2,
+            point[1] - finder_width // 2 : point[1] + finder_width // 2,
             point[0] - finder_width // 2 : point[0] + finder_width // 2,
         ]
 
@@ -348,6 +361,17 @@ if __name__ == "__main__":
                         x + (dir.center_point()[0] - finder_width // 2),
                     )]
                     break
+        for p in v_edges:
+            cv2.line(intersected, (p[1], p[0]), (p[1], p[0]), (0, 0, 255), 1)
+        v_fit = best_fit_line_with_outlier_rejection(v_edges, 1.0, 10)
+        print(len(v_edges))
+        print(v_fit)
+        for y in range(0, intersected.shape[0]):
+            x = int(v_fit[0] * y + v_fit[1])
+            if x >= 0 and x < intersected.shape[1]:
+                cv2.line(intersected, (x, y), (x, y), (255, 0, 255), 1)
+        if extraction == "v":
+            missing_vline = v_fit
 
         # iterate across each column and search for the first black pixel encountered
         for x in range(x_start, x_stop, -signs[0]):
@@ -360,21 +384,8 @@ if __name__ == "__main__":
                         y + (dir.center_point()[1] - finder_width // 2)
                     )]
                     break
-
-        for p in v_edges:
-            cv2.line(intersected, (p[1], p[0]), (p[1], p[0]), (0, 0, 255), 1)
-
         for p in h_edges:
             cv2.line(intersected, p, p, (0, 255, 0), 1)
-
-        v_fit = best_fit_line_with_outlier_rejection(v_edges, 1.0, 10)
-        print(len(v_edges))
-        print(v_fit)
-        for y in range(0, intersected.shape[0]):
-            x = int(v_fit[0] * y + v_fit[1])
-            if x >= 0 and x < intersected.shape[1]:
-                cv2.line(intersected, (x, y), (x, y), (255, 0, 255), 1)
-
         h_fit = best_fit_line_with_outlier_rejection(h_edges, 1.0, 10)
         print(len(h_edges))
         print(h_fit)
@@ -382,11 +393,32 @@ if __name__ == "__main__":
             y = int(h_fit[0] * x + h_fit[1])
             if y >= 0 and y < intersected.shape[0]:
                 cv2.line(intersected, (x, y), (x, y), (255, 0, 255), 1)
+        if extraction == "h":
+            missing_hline = h_fit
 
+        pt = pt_from_hv_line(h_fit, v_fit)
+        pts += [pt]
+        dest_pts += [dir.dest_point(MARGIN)]
+        draw_cross(intersected, pt, (255, 255, 0))
+
+
+    pts += [pt_from_hv_line(missing_hline, missing_vline)]
+    print(f"estimated {pts[3]}")
+    draw_cross(intersected, pts[3], (255, 255, 0))
+    dest_pts += [missing_direction.dest_point(MARGIN)]
 
     # plot edge points for debugging
     blended_intersection = cv2.addWeighted(intersected, 1.0, rgb, 0.5, 0)
     cv2.imshow('intersection', cv2.flip(blended_intersection, 0))
+    cv2.waitKey(0)
+
+    src_pts = np.array(pts, dtype=np.float32)
+    dst_pts = np.array(dest_pts, dtype=np.float32)
+    H, _ = cv2.findHomography(src_pts, dst_pts)
+    ximage = cv2.warpPerspective(qr_raw, H, qr_raw.shape[:2])
+    # h = compute_homography(pts, dest_pts)
+    # ximage = transform_image(qr_raw, h, qr_raw.shape)
+    cv2.imshow('transformed', cv2.flip(ximage, 0))
     cv2.waitKey(0)
 
     if False:
