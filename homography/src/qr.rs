@@ -186,7 +186,7 @@ impl Iterator for SearchDirectionIter {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-enum TrendDirection {
+pub enum TrendDirection {
     Positive,
     None,
     Negative,
@@ -265,6 +265,9 @@ pub struct ImageLuma<'a> {
     y0: usize,
     y1: usize,
     iter_row: RefCell<usize>,
+    col_iter_start: usize,
+    col_iter_row_index: RefCell<usize>,
+    iter_col: RefCell<usize>,
 }
 impl<'a> ImageLuma<'a> {
     pub fn new(data: &'a mut [u8], dimensions: (u32, u32), thresh: u8) -> Self {
@@ -280,6 +283,9 @@ impl<'a> ImageLuma<'a> {
             y0: 0,
             y1: h as usize,
             iter_row: RefCell::new(0),
+            col_iter_row_index: RefCell::new(0),
+            col_iter_start: 0,
+            iter_col: RefCell::new(0),
         }
     }
 
@@ -319,9 +325,26 @@ impl<'a> ImageLuma<'a> {
         self.y0 = br.y as usize;
         self.y1 = tl.y as usize;
         *self.iter_row.borrow_mut() = 0;
+        *self.iter_col.borrow_mut() = 0;
+        *self.col_iter_row_index.borrow_mut() = 0;
+        self.col_iter_start = 0;
     }
 
-    pub fn reset_roi(&self) { *self.iter_row.borrow_mut() = 0; }
+    pub fn set_roi_col(&'a mut self, roi_col: usize) {
+        self.col_iter_start = roi_col;
+        *self.col_iter_row_index.borrow_mut() = 0;
+        *self.iter_col.borrow_mut() = roi_col;
+    }
+
+    pub fn next_roi_col(&'a self) -> Option<usize> {
+        let next_col = *self.iter_col.borrow() + 1;
+        if next_col < self.x1 - self.x0 {
+            *self.iter_col.borrow_mut() = next_col;
+            Some(next_col)
+        } else {
+            None
+        }
+    }
 
     pub fn next_roi_row(&'a self) -> Option<(usize, &'a [u8])> {
         let cur_row = *self.iter_row.borrow();
@@ -458,6 +481,11 @@ impl<'a> ImageLuma<'a> {
         let mut last_dir = TrendDirection::None;
         let mut significance: usize = 0;
         let mut early_quit = false;
+
+        for p in self.next() {
+            println!("{}", p);
+        }
+
         while let Some((y, row)) = self.next_roi_row() {
             for i in 1..row.len() - 1 {
                 let x = (start_x as isize + i as isize * -search_dir.x) as usize;
@@ -498,6 +526,20 @@ impl<'a> ImageLuma<'a> {
             && candidate_roi.y != self.roi_height() as isize
         {
             self.roi_to_absolute(candidate_roi)
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> Iterator for ImageLuma<'_> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let cur_row = *self.col_iter_row_index.borrow();
+        if cur_row < self.y1 - self.y0 {
+            *self.col_iter_row_index.borrow_mut() = cur_row + 1;
+            Some(self.data[(self.y0 + cur_row) * self.width + self.x0 + self.col_iter_start])
         } else {
             None
         }
