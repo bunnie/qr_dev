@@ -2,8 +2,6 @@ const SEQ_LEN: usize = 5;
 use core::cell::RefCell;
 use std::ops::{BitXor, Not};
 
-use nalgebra::{QR, base, indexing};
-
 use super::*;
 
 // use fixed point for the maths. This defines where we fix the point at.
@@ -16,58 +14,393 @@ const UPPER_1: usize = 2 << SEQ_FP_SHIFT;
 const LOWER_3: usize = 2 << SEQ_FP_SHIFT;
 const UPPER_3: usize = 4 << SEQ_FP_SHIFT;
 
-#[derive(Copy, Clone, Default, Debug)]
+const STORAGE: usize = 64;
+
+struct DirRange {
+    start: usize,
+    stop_exclusive: usize,
+    is_up: bool,
+    range: DirectionalRange,
+}
+impl Iterator for DirRange {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> { self.range.next() }
+}
+impl DirRange {
+    pub fn new(start: usize, stop_exclusive: usize, is_up: bool) -> Self {
+        Self {
+            start,
+            stop_exclusive,
+            is_up,
+            range: if is_up {
+                DirectionalRange::Up(start..stop_exclusive)
+            } else {
+                DirectionalRange::Down((start..stop_exclusive).rev())
+            },
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.range = if self.is_up {
+            DirectionalRange::Up(self.start..self.stop_exclusive)
+        } else {
+            DirectionalRange::Down((self.start..self.stop_exclusive).rev())
+        }
+    }
+}
+
+enum DirectionalRange {
+    Up(core::ops::Range<usize>),
+    Down(core::iter::Rev<core::ops::Range<usize>>),
+}
+
+impl Iterator for DirectionalRange {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            DirectionalRange::Up(iter) => iter.next(),
+            DirectionalRange::Down(iter) => iter.next(),
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, Eq)]
+pub enum Axis {
+    X,
+    Y,
+}
+
+fn adjust_axis(p: Point, axis: Axis) -> (f32, f32) {
+    (
+        match axis {
+            Axis::X => p.x as f32,
+            Axis::Y => p.y as f32,
+        },
+        match axis {
+            Axis::X => p.y as f32,
+            Axis::Y => p.x as f32,
+        },
+    )
+}
+
+fn least_squares_fit(points: &[Point], axis: Axis) -> (f32, f32) {
+    let n = points.len() as f32;
+    let mut sum_x = 0.0f32;
+    let mut sum_y = 0.0f32;
+    let mut sum_xx = 0.0f32;
+    let mut sum_xy = 0.0f32;
+    for &point in points.iter() {
+        // flip x/y coordinates based on the independent axis
+        let (x, y) = adjust_axis(point, axis);
+        sum_x += x;
+        sum_y += y;
+        sum_xx += x * x;
+        sum_xy += x * y;
+    }
+    let m = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x);
+    let b = (sum_y - m * sum_x) / n;
+    (m, b)
+}
+
+fn point_from_hv_lines(hline: &LineDerivation, vline: &LineDerivation) -> Option<Point> {
+    if let Some((m1, b1)) = hline.equation {
+        if let Some((m2v, b2v)) = vline.equation {
+            println!("h: {}, {} | v: {}, {}", m1, b1, m2v, b2v);
+            let m2 = 1.0 / m2v;
+            let b2 = -b2v / m2v;
+            let x = (b2 - b1) / (m1 - m2);
+            let y = m1 * x + b1;
+            Some(Point::new(x as isize, y as isize))
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+// Threshold to reject points if they don't fit on the best-fit line
+const OUTLIER_THRESHOLD: f32 = 1.2;
+const OUTLIER_ITERS: usize = 5;
+#[derive(Copy, Clone)]
+pub struct LineDerivation {
+    pub equation: Option<(f32, f32)>,
+    pub independent_axis: Axis,
+    pub data_points: [Point; STORAGE],
+    pub data_index: usize,
+}
+impl LineDerivation {
+    pub fn new(axis: Axis) -> Self {
+        LineDerivation {
+            equation: None,
+            independent_axis: axis,
+            data_points: [Point::new(0, 0); STORAGE],
+            data_index: 0,
+        }
+    }
+
+    pub fn push(&mut self, p: Point) {
+        if self.data_index < STORAGE {
+            self.data_points[self.data_index] = p;
+            self.data_index += 1;
+        } else {
+            assert!(false, "Static storage exceeded");
+        }
+    }
+
+    /// This implementation heavily relies on f32, so it is slow on an embedded processor; however,
+    /// we need the precision and the solving should be done only rarely.
+    pub fn solve(&mut self) {
+        let mut points = [Point::default(); STORAGE];
+        let mut filtered_points = [Point::default(); STORAGE];
+        let mut residuals = [0.0f32; STORAGE];
+        let mut sorted_residuals = [0.0f32; STORAGE];
+        let mut filtered_index;
+        let mut count = self.data_index;
+        let mut m_guess: f32 = 0.0;
+        let mut b_guess: f32 = 0.0;
+
+        let mut converged_in = 0;
+        points[..count].copy_from_slice(&self.data_points[..count]);
+        for guesses in 0..OUTLIER_ITERS {
+            converged_in = guesses;
+            // guess a best-fit line
+            (m_guess, b_guess) = least_squares_fit(&points[..count], self.independent_axis);
+            // compute the residuals of the points to the guessed line
+            for (&p, residual) in points[..count].iter().zip(residuals.iter_mut()) {
+                let (x, y) = adjust_axis(p, self.independent_axis);
+                let predicted_y = m_guess * x + b_guess;
+                *residual = (y - predicted_y).abs();
+            }
+            // extract the median residual
+            sorted_residuals[..count].copy_from_slice(&residuals[..count]);
+            sorted_residuals[..count]
+                .sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Greater));
+            let threshold = (sorted_residuals[count / 2] * 1.5).max(OUTLIER_THRESHOLD);
+
+            filtered_index = 0;
+            for (i, &p) in points[..count].iter().enumerate() {
+                if residuals[i] <= threshold {
+                    filtered_points[filtered_index] = p;
+                    filtered_index += 1;
+                }
+            }
+            if filtered_index == count {
+                break;
+            } else {
+                count = filtered_index;
+                points[..count].copy_from_slice(&filtered_points[..count]);
+            }
+        }
+        println!("Solver converged in {} iterations", converged_in);
+        self.equation = Some((m_guess, b_guess))
+    }
+}
+
+pub struct Corner {
+    pub finder_ref: Option<Point>,
+    pub h_line: LineDerivation,
+    pub v_line: LineDerivation,
+}
+impl Default for Corner {
+    fn default() -> Self {
+        Self { finder_ref: None, h_line: LineDerivation::new(Axis::X), v_line: LineDerivation::new(Axis::Y) }
+    }
+}
+
+#[derive(Default)]
 pub struct QrCorners {
-    north_west: Option<Point>,
-    north_east: Option<Point>,
-    south_west: Option<Point>,
-    south_east: Option<Point>,
+    // Relies on the property that Direction enumerates and iterates consistently as a usize from 0-3,
+    // which covers each of the four corner directions exactly and uniquely.
+    corners: [Corner; 4],
+    width: isize,
+    height: isize,
+    derived_corner: Direction,
+    finder_width: usize,
 }
 impl QrCorners {
-    pub fn from_finders(points: &[Point; 3], dimensions: (u32, u32)) -> Option<Self> {
+    pub fn from_finders(points: &[Point; 3], dimensions: (u32, u32), finder_width: usize) -> Option<Self> {
         let (widthu32, heightu32) = dimensions;
         let x_half = widthu32 as isize / 2;
         let y_half = heightu32 as isize / 2;
 
         let mut qrc = QrCorners::default();
+        qrc.width = widthu32 as isize;
+        qrc.height = heightu32 as isize;
+        qrc.finder_width = finder_width;
 
         for &p in points {
             if p.x < x_half && p.y < y_half {
-                qrc.south_west = Some(p);
+                qrc.corners[Direction::SouthWest as usize].finder_ref = Some(p);
             } else if p.x < x_half && p.y >= y_half {
-                qrc.north_west = Some(p);
+                qrc.corners[Direction::NorthWest as usize].finder_ref = Some(p);
             } else if p.x >= x_half && p.y < y_half {
-                qrc.south_east = Some(p);
+                qrc.corners[Direction::SouthEast as usize].finder_ref = Some(p);
             } else if p.x >= x_half && p.y >= y_half {
-                qrc.north_east = Some(p);
+                qrc.corners[Direction::NorthEast as usize].finder_ref = Some(p);
             }
         }
 
         // check that at least three corners are filled
-        if (if qrc.north_west.is_some() { 1 } else { 0 }
-            + if qrc.north_east.is_some() { 1 } else { 0 }
-            + if qrc.south_west.is_some() { 1 } else { 0 }
-            + if qrc.south_east.is_some() { 1 } else { 0 })
-            == 3
-        {
+        if qrc.corners.iter().map(|c| if c.finder_ref.is_some() { 1 } else { 0 }).sum::<usize>() == 3 {
+            for (dir_index, corner) in qrc.corners.iter().enumerate() {
+                if corner.finder_ref.is_none() {
+                    qrc.derived_corner = Direction::try_from(dir_index).unwrap();
+                }
+            }
             Some(qrc)
         } else {
             None
         }
     }
 
-    pub fn missing_corner_direction(&self) -> Option<SearchDirection> {
-        if self.north_east.is_none() {
-            Some(SearchDirection::NorthEast)
-        } else if self.north_west.is_none() {
-            Some(SearchDirection::NorthWest)
-        } else if self.south_east.is_none() {
-            Some(SearchDirection::SouthEast)
-        } else if self.south_west.is_none() {
-            Some(SearchDirection::SouthWest)
-        } else {
-            None
+    pub fn derived_corner(&self) -> Direction { self.derived_corner }
+
+    pub fn center_point(&self, dir: Direction) -> Option<Point> { self.corners[dir as usize].finder_ref }
+
+    fn outline_search(&mut self, ir: &mut ImageRoi) {
+        for (d, corner) in self.corners.iter_mut().enumerate() {
+            let direction = Direction::try_from(d).unwrap();
+            // this test ensures we automatically skip the "missing" corner
+            if let Some(p) = corner.finder_ref {
+                ir.set_roi(
+                    Point::new(p.x - self.finder_width as isize / 2, p.y + self.finder_width as isize / 2),
+                    Point::new(p.x + self.finder_width as isize / 2, p.y - self.finder_width as isize / 2),
+                );
+                let signs: Point = direction.into();
+
+                let mut y_range = if signs.y < 0 {
+                    DirRange::new(0, ir.roi_height(), true)
+                } else {
+                    DirRange::new(0, ir.roi_height(), false)
+                };
+                let mut x_range = if signs.x < 0 {
+                    DirRange::new(0, ir.roi_width(), true)
+                } else {
+                    DirRange::new(0, ir.roi_width(), false)
+                };
+
+                loop {
+                    if let Some(y) = y_range.next() {
+                        x_range.reset();
+                        loop {
+                            if let Some(x) = x_range.next() {
+                                if Color::Black
+                                    == ir.get_roi_binary_pixel(Point::new(x as isize, y as isize)).unwrap()
+                                {
+                                    corner.v_line.push(
+                                        ir.roi_to_absolute(Point::new(x as isize, y as isize)).unwrap(),
+                                    );
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                corner.v_line.solve();
+
+                y_range.reset();
+                x_range.reset();
+
+                loop {
+                    if let Some(x) = x_range.next() {
+                        y_range.reset();
+                        loop {
+                            if let Some(y) = y_range.next() {
+                                if Color::Black
+                                    == ir.get_roi_binary_pixel(Point::new(x as isize, y as isize)).unwrap()
+                                {
+                                    corner.h_line.push(
+                                        ir.roi_to_absolute(Point::new(x as isize, y as isize)).unwrap(),
+                                    );
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                corner.h_line.solve();
+            }
         }
+    }
+
+    /// Returns a (src, dst) tuple of point mappings for homomorphic transformation.
+    /// The destination is the four corners of image shape as specified when the structure
+    /// was made, with a margin added.
+    ///
+    /// The margin should be negative for the corners to go in toward the center.
+    pub fn mapping(
+        &mut self,
+        ir: &mut ImageRoi,
+        margin: isize,
+        debug: &mut RgbImage,
+    ) -> ([Option<Point>; 4], [Option<Point>; 4]) {
+        // first, search for the lines that define the outline of the QR code
+        self.outline_search(ir);
+
+        let mut src = [None; 4];
+        let mut dst = [None; 4];
+
+        for (i, corner) in self.corners.iter().enumerate() {
+            if let Some(_p) = corner.finder_ref {
+                for p in corner.v_line.data_points[..corner.v_line.data_index].iter() {
+                    debug.put_pixel(p.x as u32, p.y as u32, Rgb([255, 0, 0]));
+                }
+                for p in corner.h_line.data_points[..corner.h_line.data_index].iter() {
+                    debug.put_pixel(p.x as u32, p.y as u32, Rgb([255, 0, 0]));
+                }
+                // draw_line(debug, &corner.h_line, [0, 255, 255]);
+                // draw_line(debug, &corner.v_line, [0, 255, 255]);
+                // This is a known finder corner:
+                // derive the corner from the extracted h and v lines along the finder pattern
+                src[i] = point_from_hv_lines(&corner.h_line, &corner.v_line);
+            } else {
+                // This is the unknown corner:
+                // derive the corner from the h and v lines from the nearest finders' lines
+                let h_line = match Direction::try_from(i) {
+                    Ok(Direction::NorthWest) => &self.corners[Direction::NorthEast as usize].h_line,
+                    Ok(Direction::NorthEast) => &self.corners[Direction::NorthWest as usize].h_line,
+                    Ok(Direction::SouthWest) => &self.corners[Direction::SouthEast as usize].h_line,
+                    Ok(Direction::SouthEast) => &self.corners[Direction::SouthWest as usize].h_line,
+                    _ => panic!("Bad index"),
+                };
+                let v_line = match Direction::try_from(i) {
+                    Ok(Direction::NorthWest) => &self.corners[Direction::SouthWest as usize].v_line,
+                    Ok(Direction::NorthEast) => &self.corners[Direction::SouthEast as usize].v_line,
+                    Ok(Direction::SouthWest) => &self.corners[Direction::NorthWest as usize].v_line,
+                    Ok(Direction::SouthEast) => &self.corners[Direction::NorthEast as usize].v_line,
+                    _ => panic!("Bad index"),
+                };
+                draw_line(debug, &h_line, [255, 255, 0]);
+                draw_line(debug, &v_line, [255, 255, 0]);
+                for p in v_line.data_points[..v_line.data_index].iter() {
+                    debug.put_pixel(p.x as u32, p.y as u32, Rgb([255, 0, 0]));
+                }
+                for p in h_line.data_points[..h_line.data_index].iter() {
+                    debug.put_pixel(p.x as u32, p.y as u32, Rgb([255, 0, 0]));
+                }
+                src[i] = point_from_hv_lines(h_line, v_line);
+            }
+            dst[i] = match Direction::try_from(i) {
+                Ok(Direction::NorthWest) => Some(Point::new(-margin, self.height + margin)),
+                Ok(Direction::NorthEast) => Some(Point::new(self.width + margin, self.height + margin)),
+                Ok(Direction::SouthWest) => Some(Point::new(-margin, -margin)),
+                Ok(Direction::SouthEast) => Some(Point::new(self.width + margin, -margin)),
+                _ => None,
+            };
+        }
+
+        (src, dst)
     }
 }
 
@@ -131,19 +464,24 @@ impl BitXor for Color {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub enum SearchDirection {
-    North,
-    NorthWest,
-    NorthEast,
-    West,
-    East,
-    South,
-    SouthWest,
-    SouthEast,
+/// We use Direction as both a way to encode a meaning and a unique array index.
+#[repr(usize)]
+pub enum Direction {
+    NorthWest = 0,
+    NorthEast = 1,
+    SouthWest = 2,
+    SouthEast = 3,
+    North = 4,
+    West = 5,
+    East = 6,
+    South = 7,
 }
-impl Into<Point> for SearchDirection {
+impl Default for Direction {
+    fn default() -> Self { Self::NorthWest }
+}
+impl Into<Point> for Direction {
     fn into(self) -> Point {
-        use SearchDirection::*;
+        use Direction::*;
         match self {
             North => Point::new(0, 1),
             West => Point::new(-1, 0),
@@ -156,28 +494,103 @@ impl Into<Point> for SearchDirection {
         }
     }
 }
+impl Into<usize> for Direction {
+    fn into(self) -> usize {
+        use Direction::*;
+        match self {
+            NorthWest => 0,
+            NorthEast => 1,
+            SouthWest => 2,
+            SouthEast => 3,
+            North => 4,
+            West => 5,
+            East => 6,
+            South => 7,
+        }
+    }
+}
+impl TryFrom<usize> for Direction {
+    type Error = &'static str;
 
-pub struct SearchDirectionIter {
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        use Direction::*;
+        match value {
+            0 => Ok(NorthWest),
+            1 => Ok(NorthEast),
+            2 => Ok(SouthWest),
+            3 => Ok(SouthEast),
+            4 => Ok(North),
+            5 => Ok(West),
+            6 => Ok(East),
+            7 => Ok(South),
+            _ => Err("Invalid direction coding"),
+        }
+    }
+}
+impl Direction {
+    pub fn eight_way_iter() -> EightConnectedIter { EightConnectedIter { index: 0 } }
+
+    pub fn four_way_iter() -> FourConnectedIter { FourConnectedIter { index: 0 } }
+
+    pub fn corner_iter() -> CornerIter { CornerIter { index: 0 } }
+}
+
+pub struct CornerIter {
     index: usize,
 }
 
-impl SearchDirection {
-    pub fn iter() -> SearchDirectionIter { SearchDirectionIter { index: 0 } }
-}
-
-impl Iterator for SearchDirectionIter {
-    type Item = SearchDirection;
+impl Iterator for CornerIter {
+    type Item = Direction;
 
     fn next(&mut self) -> Option<Self::Item> {
         let direction = match self.index {
-            0 => Some(SearchDirection::North),
-            1 => Some(SearchDirection::NorthWest),
-            2 => Some(SearchDirection::NorthEast),
-            3 => Some(SearchDirection::West),
-            4 => Some(SearchDirection::East),
-            5 => Some(SearchDirection::South),
-            6 => Some(SearchDirection::SouthWest),
-            7 => Some(SearchDirection::SouthEast),
+            0 => Some(Direction::NorthWest),
+            1 => Some(Direction::NorthEast),
+            2 => Some(Direction::SouthWest),
+            3 => Some(Direction::SouthEast),
+            _ => None,
+        };
+        self.index += 1;
+        direction
+    }
+}
+pub struct EightConnectedIter {
+    index: usize,
+}
+
+impl Iterator for EightConnectedIter {
+    type Item = Direction;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let direction = match self.index {
+            0 => Some(Direction::NorthWest),
+            1 => Some(Direction::NorthEast),
+            2 => Some(Direction::SouthWest),
+            3 => Some(Direction::SouthEast),
+            4 => Some(Direction::North),
+            5 => Some(Direction::West),
+            6 => Some(Direction::East),
+            7 => Some(Direction::South),
+            _ => None,
+        };
+        self.index += 1;
+        direction
+    }
+}
+
+pub struct FourConnectedIter {
+    index: usize,
+}
+
+impl Iterator for FourConnectedIter {
+    type Item = Direction;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let direction = match self.index {
+            0 => Some(Direction::North),
+            1 => Some(Direction::West),
+            2 => Some(Direction::East),
+            3 => Some(Direction::South),
             _ => None,
         };
         self.index += 1;
@@ -212,52 +625,11 @@ impl Into<isize> for TrendDirection {
     }
 }
 
-/// Doesn't need to be too big, because the overall area is at most 256, and
-/// we pay a performance penalty to zeroize unused space.
-const TREND_LEN: usize = 64;
-#[derive(Debug)]
-pub struct Trend {
-    data: [usize; TREND_LEN],
-    index: usize,
-    greater: isize,
-    lesser: isize,
-    last: usize,
-}
-impl Trend {
-    pub fn new() -> Self { Self { data: [0usize; TREND_LEN], index: 0, greater: 0, lesser: 0, last: 0 } }
-
-    pub fn push(&mut self, value: usize) -> TrendDirection {
-        self.data[self.index] = value;
-        let ret = if self.index == 0 {
-            self.last = value;
-            TrendDirection::None
-        } else {
-            if value > self.last {
-                self.greater += 1;
-                TrendDirection::Positive
-            } else if value < self.last {
-                self.lesser += 1;
-                TrendDirection::Negative
-            } else {
-                TrendDirection::None
-            }
-        };
-        self.index += 1;
-        assert!(self.index < TREND_LEN, "Increase FUZZY_LEN");
-        ret
-    }
-
-    /// Returns positive, zero, or negative value based on the trend of the values recorded
-    pub fn trend(&self) -> TrendDirection { (self.greater - self.lesser).into() }
-
-    /// Size of the trend. The sign does not matter.
-    pub fn magnitude(&self) -> usize { (self.greater - self.lesser).abs() as usize }
-}
 /// (0, 0) is at the lower left corner
-pub struct ImageLuma<'a> {
+pub struct ImageRoi<'a> {
     data: &'a mut [u8],
-    width: usize,
-    height: usize,
+    pub width: usize,
+    pub height: usize,
     thresh: u8,
     // coordinates of a subimage, if set. The ROI includes these points.
     x0: usize,
@@ -269,7 +641,7 @@ pub struct ImageLuma<'a> {
     col_iter_row_index: RefCell<usize>,
     iter_col: RefCell<usize>,
 }
-impl<'a> ImageLuma<'a> {
+impl<'a> ImageRoi<'a> {
     pub fn new(data: &'a mut [u8], dimensions: (u32, u32), thresh: u8) -> Self {
         let (w, h) = dimensions;
         // ROI is default the entire area
@@ -297,6 +669,15 @@ impl<'a> ImageLuma<'a> {
 
     pub fn get_pixel(&self, x: usize, y: usize) -> u8 { self.data[x + y * self.width] }
 
+    pub fn get_roi_binary_pixel(&self, roi_point: Point) -> Option<Color> {
+        if let Some(abs_p) = self.roi_to_absolute(roi_point) {
+            let p = self.get_pixel(abs_p.x as usize, abs_p.y as usize);
+            Some(self.binarize(p))
+        } else {
+            None
+        }
+    }
+
     pub fn put_pixel(&mut self, x: usize, y: usize, luma: u8) {
         self.data[x + y * self.width as usize] = luma;
     }
@@ -320,6 +701,8 @@ impl<'a> ImageLuma<'a> {
         assert!(tl.y >= 0);
         assert!(br.x >= 0);
         assert!(br.y >= 0);
+        assert!(br.x >= tl.x);
+        assert!(tl.y >= br.y);
         self.x0 = tl.x as usize;
         self.x1 = br.x as usize;
         self.y0 = br.y as usize;
@@ -398,7 +781,7 @@ impl<'a> ImageLuma<'a> {
         if x > 0 && x < (self.width - 1) as isize && y > 0 && y < (self.height - 1) as isize {
             // Count 8 neighbors
             let mut count: usize = 0;
-            for direction in SearchDirection::iter() {
+            for direction in Direction::eight_way_iter() {
                 let p: Point = direction.into();
                 count += self.to_count(x as isize + p.x, y as isize + p.y, color);
             }
@@ -432,107 +815,9 @@ impl<'a> ImageLuma<'a> {
             None
         }
     }
-
-    /// Find the corner of a finder.
-    pub fn corner_finder(
-        // must have an ROI set
-        &mut self,
-        // this point needs to be transformed to the center of the ROI
-        center: Point,
-        // putative width of the finder
-        finder_width: usize,
-        // the expected direction of the corner
-        corner_dir: SearchDirection,
-        // returns the Point in absolute image offset
-    ) -> Option<Point> {
-        // constrain our search area to a smaller ROI.
-        let search_dir: Point = corner_dir.into();
-        // check that we were given a *corner*, not a cardinal
-        assert!(search_dir.x != 0);
-        assert!(search_dir.y != 0);
-
-        let tl = Point::new(
-            (center.x - (finder_width / 2 + finder_width / 7) as isize).max(0),
-            (center.y + (finder_width / 2 + finder_width / 7) as isize).min(self.height as isize),
-        );
-        let br = Point::new(
-            (center.x + (finder_width / 2 + finder_width / 7) as isize).min(self.width as isize),
-            (center.y - (finder_width / 2 + finder_width / 7) as isize).max(0),
-        );
-        self.set_roi(tl, br);
-
-        // figure out which edge of the ROI we're starting the search from;
-        // set the starting point to be one pixel beyond the edge.
-        let start_x = if search_dir.x < 0 { 1 } else { self.roi_width() - 1 };
-
-        // set candidate at the extreme end of the search range (opposite corner of search direction)
-        let mut candidate_roi = Point::new(
-            if search_dir.x < 0 { self.roi_width() as isize - 1 } else { 1 },
-            // if search_dir.y < 0 { 1 } else { self.roi_height() as isize - 1 },
-            0,
-        );
-
-        // threshold for determining that a pixel should be counted
-        const EDGE_THRESH: usize = 3;
-
-        // search past the inflection point by the estimated width of a QR row
-        let symbol_width = finder_width / (1 + 1 + 3 + 1 + 1).max(1);
-        let mut trend = Trend::new();
-        let mut last_dir = TrendDirection::None;
-        let mut significance: usize = 0;
-        let mut early_quit = false;
-
-        for p in self.next() {
-            println!("{}", p);
-        }
-
-        while let Some((y, row)) = self.next_roi_row() {
-            for i in 1..row.len() - 1 {
-                let x = (start_x as isize + i as isize * -search_dir.x) as usize;
-                if self.binarize(row[x]) == Color::Black {
-                    if self.neighbor_count_roi(Point::new(x as isize, y as isize), Color::Black).unwrap()
-                        >= EDGE_THRESH
-                    {
-                        let dir = trend.push(x);
-                        if dir != last_dir {
-                            if candidate_roi.x * search_dir.x < i as isize * search_dir.x {
-                                candidate_roi.x = i as isize;
-                            }
-                            if candidate_roi.y * search_dir.y < y as isize * search_dir.y {
-                                candidate_roi.y = y as isize;
-                            }
-                            last_dir = dir;
-                            // declining trend
-                            if trend.magnitude() + symbol_width < significance {
-                                early_quit = true;
-                            }
-                        }
-                        if trend.magnitude() > significance {
-                            significance = trend.magnitude();
-                        }
-                        break;
-                    }
-                }
-            }
-            if early_quit {
-                break;
-            }
-        }
-
-        // If the search didn't terminate at an edge of the ROI, the candidate is the corner point.
-        if candidate_roi.x != 0
-            && candidate_roi.x != self.roi_width() as isize
-            && candidate_roi.y != 0
-            && candidate_roi.y != self.roi_height() as isize
-        {
-            self.roi_to_absolute(candidate_roi)
-        } else {
-            None
-        }
-    }
 }
 
-impl<'a> Iterator for ImageLuma<'_> {
+impl<'a> Iterator for ImageRoi<'_> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -722,134 +1007,4 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
         }
     }
     candidate_width / candidate_index
-}
-
-/// Function to estimate the fourth point from three points. The result is not exact
-/// because we don't know the obliqueness of the camera plane with respect to the image.
-pub fn estimate_fourth_point(points: &[Point; 3]) -> Point {
-    let x4 = points[0].x + points[2].x - points[1].x;
-    let y4 = points[0].y + points[2].y - points[1].y;
-
-    Point::new(x4, y4)
-}
-
-/// Performs Zhang-Suen Thinning on a binary image represented as a slice of u8.
-/// The input image is modified in-place.
-///
-/// # Arguments
-/// - `image`: A mutable slice of `u8` representing the binary image (0 or 1).
-/// - `width`: The width of the image.
-/// - `height`: The height of the image.
-/// - `threshold`: Threshold value to binarize the image. Pixels >= threshold are set to 1, others to 0.
-pub fn zhang_suen_thinning(image: &mut [u8], width: usize, height: usize, threshold: u8) {
-    // Binarize the image using the given threshold
-    binarize_image(image, threshold);
-
-    // Prepare to iterate until no changes are made
-    let mut has_changes = true;
-
-    while has_changes {
-        has_changes = false;
-
-        // First Sub-iteration
-        let mut markers = vec![0u8; image.len()]; // 0: keep, 1: delete
-        for y in 1..(height - 1) {
-            for x in 1..(width - 1) {
-                let idx = y * width + x;
-                if image[idx] == 1 && should_remove_pixel(image, x, y, width, true) {
-                    markers[idx] = 1;
-                    has_changes = true;
-                }
-            }
-        }
-
-        let mut debug = markers.clone();
-        unbinarize_image(&mut debug);
-        show_image(&DynamicImage::ImageLuma8(GrayImage::from_vec(width as _, height as _, debug).unwrap()));
-
-        // Remove marked pixels
-        for (i, &marker) in markers.iter().enumerate() {
-            if marker == 1 {
-                image[i] = 0;
-            }
-        }
-
-        // Second Sub-iteration
-        let mut markers = vec![0u8; image.len()];
-        for y in 1..(height - 1) {
-            for x in 1..(width - 1) {
-                let idx = y * width + x;
-                if image[idx] == 1 && should_remove_pixel(image, x, y, width, false) {
-                    markers[idx] = 1;
-                    has_changes = true;
-                }
-            }
-        }
-
-        // Remove marked pixels
-        for (i, &marker) in markers.iter().enumerate() {
-            if marker == 1 {
-                image[i] = 0;
-            }
-        }
-    }
-}
-
-/// Binarizes the image based on a threshold.
-fn binarize_image(image: &mut [u8], threshold: u8) {
-    for pixel in image.iter_mut() {
-        *pixel = if *pixel >= threshold { 1 } else { 0 };
-    }
-}
-
-pub fn unbinarize_image(image: &mut [u8]) {
-    for pixel in image.iter_mut() {
-        *pixel = if *pixel != 0 { 255 } else { 0 };
-    }
-}
-
-/// Checks if a pixel should be removed according to the Zhang-Suen criteria.
-/// `is_first_iteration` indicates whether it's the first or second sub-iteration.
-fn should_remove_pixel(image: &[u8], x: usize, y: usize, width: usize, is_first_iteration: bool) -> bool {
-    let idx = y * width + x;
-
-    // Get 8 neighbors
-    let p2 = image[(y - 1) * width + x]; // north
-    let p3 = image[(y - 1) * width + (x + 1)]; // northeast
-    let p4 = image[y * width + (x + 1)]; // east
-    let p5 = image[(y + 1) * width + (x + 1)]; // southeast
-    let p6 = image[(y + 1) * width + x]; // south
-    let p7 = image[(y + 1) * width + (x - 1)]; // southwest
-    let p8 = image[y * width + (x - 1)]; // west
-    let p9 = image[(y - 1) * width + (x - 1)]; // northwest
-
-    // Compute the number of non-zero neighbors
-    let non_zero_count = p2 + p3 + p4 + p5 + p6 + p7 + p8 + p9;
-
-    // Count the number of 0 to 1 transitions in the sequence P2 -> P3 -> P4 -> P5 -> P6 -> P7 -> P8 -> P9 ->
-    // P2
-    let transitions = count_transitions(&[p2, p3, p4, p5, p6, p7, p8, p9, p2]);
-
-    // Conditions
-    if non_zero_count >= 2
-        && non_zero_count <= 6
-        && transitions == 1
-        && (is_first_iteration && (p2 * p4 * p6 == 0) && (p4 * p6 * p8 == 0))
-        || (!is_first_iteration && (p2 * p4 * p8 == 0) && (p2 * p6 * p8 == 0))
-    {
-        return true;
-    }
-
-    false
-}
-
-/// Counts the number of 0 to 1 transitions in the given neighborhood sequence.
-fn count_transitions(neighbors: &[u8]) -> u8 {
-    let mut count = 0;
-    for i in 0..neighbors.len() - 1 {
-        if neighbors[i] == 0 && neighbors[i + 1] == 1 {
-            count += 1;
-        }
-    }
-    count
 }
