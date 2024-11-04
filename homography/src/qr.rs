@@ -108,11 +108,16 @@ fn point_from_hv_lines(hline: &LineDerivation, vline: &LineDerivation) -> Option
     if let Some((m1, b1)) = hline.equation {
         if let Some((m2v, b2v)) = vline.equation {
             println!("h: {}, {} | v: {}, {}", m1, b1, m2v, b2v);
-            let m2 = 1.0 / m2v;
-            let b2 = -b2v / m2v;
-            let x = (b2 - b1) / (m1 - m2);
-            let y = m1 * x + b1;
-            Some(Point::new(x as isize, y as isize))
+            if m2v != 0.0 {
+                let m2 = 1.0 / m2v;
+                let b2 = -b2v / m2v;
+                let x = (b2 - b1) / (m1 - m2);
+                let y = m1 * x + b1;
+                Some(Point::new(x as isize, y as isize))
+            } else {
+                let y = m1 * b2v + b1;
+                Some(Point::new(b2v as isize, y as isize))
+            }
         } else {
             None
         }
@@ -122,7 +127,7 @@ fn point_from_hv_lines(hline: &LineDerivation, vline: &LineDerivation) -> Option
 }
 
 // Threshold to reject points if they don't fit on the best-fit line
-const OUTLIER_THRESHOLD: f32 = 1.2;
+const OUTLIER_THRESHOLD: f32 = 1.0;
 const OUTLIER_ITERS: usize = 5;
 #[derive(Copy, Clone)]
 pub struct LineDerivation {

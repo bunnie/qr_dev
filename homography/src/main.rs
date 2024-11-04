@@ -6,7 +6,7 @@ use qr::*;
 mod minigfx;
 use minigfx::*;
 mod glue;
-use image::{DynamicImage, GenericImageView, GrayImage, Rgb, RgbImage, RgbaImage};
+use image::{DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage, RgbaImage};
 use image::{ImageBuffer, Pixel};
 use minifb::{Key, Window, WindowOptions};
 
@@ -168,68 +168,32 @@ fn main() {
         if all_found {
             match find_homography(src_f, dst_f) {
                 Some(h) => {
-                    println!("{:}", h);
-                    // iterate through pixels and apply homography
-                    for y in 0..image.dimensions().1 {
-                        for x in 0..image.dimensions().0 {
-                            let (x_dst, y_dst) = apply_homography(&h, (x as f32, y as f32));
-                            if (x_dst as i32 >= 0)
-                                && ((x_dst as i32) < image.dimensions().0 as i32)
-                                && (y_dst as i32 >= 0)
-                                && ((y_dst as i32) < image.dimensions().1 as i32)
-                            {
-                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                                dest_img.put_pixel(
-                                    x_dst as u32,
-                                    y_dst as u32,
-                                    image.get_pixel(x as u32, y as u32).to_rgb(),
-                                );
-                            }
-
-                            let (x_dst, y_dst) = apply_homography(&h, (x as f32 + 0.5, y as f32));
-                            if (x_dst as i32 >= 0)
-                                && ((x_dst as i32) < image.dimensions().0 as i32)
-                                && (y_dst as i32 >= 0)
-                                && ((y_dst as i32) < image.dimensions().1 as i32)
-                            {
-                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                                dest_img.put_pixel(
-                                    x_dst as u32,
-                                    y_dst as u32,
-                                    image.get_pixel(x as u32, y as u32).to_rgb(),
-                                );
-                            }
-
-                            let (x_dst, y_dst) = apply_homography(&h, (x as f32, y as f32 + 0.5));
-                            if (x_dst as i32 >= 0)
-                                && ((x_dst as i32) < image.dimensions().0 as i32)
-                                && (y_dst as i32 >= 0)
-                                && ((y_dst as i32) < image.dimensions().1 as i32)
-                            {
-                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                                dest_img.put_pixel(
-                                    x_dst as u32,
-                                    y_dst as u32,
-                                    image.get_pixel(x as u32, y as u32).to_rgb(),
-                                );
-                            }
-
-                            let (x_dst, y_dst) = apply_homography(&h, (x as f32 + 0.5, y as f32 + 0.5));
-                            if (x_dst as i32 >= 0)
-                                && ((x_dst as i32) < image.dimensions().0 as i32)
-                                && (y_dst as i32 >= 0)
-                                && ((y_dst as i32) < image.dimensions().1 as i32)
-                            {
-                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                                dest_img.put_pixel(
-                                    x_dst as u32,
-                                    y_dst as u32,
-                                    image.get_pixel(x as u32, y as u32).to_rgb(),
-                                );
+                    if let Some(h_inv) = h.try_inverse() {
+                        println!("{:}", h_inv);
+                        // iterate through pixels and apply homography
+                        for y in 0..image.dimensions().1 {
+                            for x in 0..image.dimensions().0 {
+                                let (x_src, y_src) = apply_inverse_homography(&h_inv, (x as f32, y as f32));
+                                if (x_src as i32 >= 0)
+                                    && ((x_src as i32) < image.dimensions().0 as i32)
+                                    && (y_src as i32 >= 0)
+                                    && ((y_src as i32) < image.dimensions().1 as i32)
+                                {
+                                    // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
+                                    dest_img.put_pixel(
+                                        x as u32,
+                                        y as u32,
+                                        image.get_pixel(x_src as u32, y_src as u32).to_rgb(),
+                                    );
+                                } else {
+                                    dest_img.put_pixel(x, y, Rgb([255, 255, 255]));
+                                }
                             }
                         }
+                        show_image(&DynamicImage::ImageRgb8(dest_img));
+                    } else {
+                        println!("Matrix is not invertable");
                     }
-                    show_image(&DynamicImage::ImageRgb8(dest_img));
                 }
                 _ => println!("err"),
             }

@@ -61,3 +61,14 @@ pub fn apply_homography(homography: &Matrix3<f32>, point: (f32, f32)) -> (f32, f
     let w = transformed[2];
     (transformed[0] / w, transformed[1] / w)
 }
+
+const HOM_FP_SHIFT: usize = 16;
+
+pub fn apply_inverse_homography(inv_homography: &Matrix3<f32>, point: (f32, f32)) -> (f32, f32) {
+    let (x, y) = point;
+    let transformed = inv_homography * Vector3::new(x, y, 1.0);
+
+    // Normalize the homogeneous coordinates
+    let w = transformed[2];
+    (transformed[0] / w, transformed[1] / w)
+}
