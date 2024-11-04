@@ -1,4 +1,5 @@
-use image::{DynamicImage, GrayImage, ImageBuffer, Luma, Pixel, Rgb, Rgba};
+use image::{ImageBuffer, Luma, Pixel, Rgb};
+
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -36,7 +37,7 @@ impl Into<ColorNative> for Rgb<u8> {
     }
 }
 
-pub fn line(fb: &mut ImageBuffer::<Rgb<u8>, Vec::<u8>>, l: Line, clip: Option<Rectangle>, xor: bool) {
+pub fn line(fb: &mut ImageBuffer<Rgb<u8>, Vec<u8>>, l: Line, clip: Option<Rectangle>, xor: bool) {
     let color: ColorNative;
     if l.style.stroke_color.is_some() {
         color = l.style.stroke_color.unwrap();
