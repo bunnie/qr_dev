@@ -1,5 +1,4 @@
 mod homography;
-use std::any::Any;
 
 use homography::*;
 mod qr;
@@ -39,6 +38,59 @@ fn show_image(flipped_img: &DynamicImage) {
 }
 
 const BW_THRESH: u8 = 128;
+/// Finder search margin, as defined by expected QR code code widths (so this scales with the effective
+/// resolution of the code)
+const FINDER_SEARCH_MARGIN: isize = 2;
+/// How much we want the final QR image to be "pulled in" from the outer edge of the image buffer
+const HOMOGRAPHY_MARGIN: isize = -4;
+const CROSSHAIR_LEN: isize = 3;
+
+fn draw_crosshair(image: &mut RgbImage, p: Point, color: [u8; 3]) {
+    glue::line(
+        image,
+        Line::new_with_style(
+            p + Point::new(0, CROSSHAIR_LEN),
+            p - Point::new(0, CROSSHAIR_LEN),
+            DrawStyle::stroke_color(Rgb(color).into()),
+        ),
+        None,
+        false,
+    );
+    glue::line(
+        image,
+        Line::new_with_style(
+            p + Point::new(CROSSHAIR_LEN, 0),
+            p - Point::new(CROSSHAIR_LEN, 0),
+            DrawStyle::stroke_color(Rgb(color).into()),
+        ),
+        None,
+        false,
+    );
+}
+
+fn draw_line(image: &mut RgbImage, l: &LineDerivation, color: [u8; 3]) {
+    let axis = l.independent_axis;
+    let (m, b) = l.equation.unwrap();
+    match axis {
+        Axis::X => {
+            for x in 0..image.width() {
+                let y = (x as f32 * m + b) as isize;
+                if y >= 0 && y < image.height() as isize {
+                    image.put_pixel(x as u32, y as u32, Rgb(color));
+                }
+            }
+        }
+        Axis::Y => {
+            for y in 0..image.height() {
+                let x = (y as f32 * m + b) as isize;
+                if x >= 0 && x < image.width() as isize {
+                    image.put_pixel(x as u32, y as u32, Rgb(color));
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     // Load the PNG file
     let mut img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
@@ -51,14 +103,13 @@ fn main() {
         let luma = pixel[0];
         rgb_image.put_pixel(x, y, Rgb([luma, luma, luma]));
     }
-    let mut drawable_image = &mut rgb_image;
+    let drawable_image = &mut rgb_image;
 
     // Get image dimensions and raw pixel data
-    let (width, height) = dims;
+    let (width, _height) = dims;
     let mut candidates: [Option<Point>; 8] = [None; 8];
     let finder_width = find_finders(&mut candidates, &image, BW_THRESH, width as _) as isize;
 
-    const CROSSHAIR_LEN: isize = 3;
     let mut candidates_found = 0;
     let mut candidate3 = [Point::new(0, 0); 3];
     for candidate in candidates.iter() {
@@ -71,190 +122,119 @@ fn main() {
         }
     }
 
-    let qr_corners = QrCorners::from_finders(&candidate3, image.dimensions());
-    if let Some(qrc) = qr_corners {
-        let missing_direction = qrc.missing_corner_direction().expect("Unexpected QR code structure");
-        let p4 = estimate_fourth_point(&candidate3);
-        let mut il = ImageLuma::new(&mut image, dims, BW_THRESH);
-        if let Some(mc) = il.corner_finder(p4, finder_width as usize - 2, missing_direction) {
-            drawable_image.iter_mut().for_each(|p| *p = if *p < BW_THRESH { 0 } else { 255 });
-            for &p in candidate3.iter().chain([mc].iter()) {
-                let c_screen = p;
-                // flip coordinates to match the camera data
-                // c_screen = Point::new(c_screen.x, drawable_image.dimensions().1 as isize - 1 - c_screen.y);
-                // vertical cross hair
-                glue::line(
-                    &mut drawable_image,
-                    Line::new_with_style(
-                        c_screen + Point::new(0, CROSSHAIR_LEN),
-                        c_screen - Point::new(0, CROSSHAIR_LEN),
-                        DrawStyle::stroke_color(Rgb([0, 255, 0]).into()),
-                    ),
-                    None,
-                    false,
-                );
-                // horizontal cross hair
-                glue::line(
-                    &mut drawable_image,
-                    Line::new_with_style(
-                        c_screen + Point::new(CROSSHAIR_LEN, 0),
-                        c_screen - Point::new(CROSSHAIR_LEN, 0),
-                        DrawStyle::stroke_color(Rgb([0, 255, 0]).into()),
-                    ),
-                    None,
-                    false,
-                );
-            }
-            show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
-        } else {
-            println!("Search started at {:?}, width {}", p4, finder_width);
-            for &p in candidate3.iter().chain([p4].iter()) {
-                let c_screen = p;
-                // flip coordinates to match the camera data
-                // c_screen = Point::new(c_screen.x, drawable_image.dimensions().1 as isize - 1 - c_screen.y);
-                // vertical cross hair
-                glue::line(
-                    &mut drawable_image,
-                    Line::new_with_style(
-                        c_screen + Point::new(0, CROSSHAIR_LEN),
-                        c_screen - Point::new(0, CROSSHAIR_LEN),
-                        DrawStyle::stroke_color(Rgb([255, 0, 0]).into()),
-                    ),
-                    None,
-                    false,
-                );
-                // horizontal cross hair
-                glue::line(
-                    &mut drawable_image,
-                    Line::new_with_style(
-                        c_screen + Point::new(CROSSHAIR_LEN, 0),
-                        c_screen - Point::new(CROSSHAIR_LEN, 0),
-                        DrawStyle::stroke_color(Rgb([255, 0, 0]).into()),
-                    ),
-                    None,
-                    false,
-                );
-            }
-            show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
-        }
-    }
-
     if candidates_found == 3 {
-        // Example usage with known three points
-        let p1 = candidate3[0].to_f32();
-        let p2 = candidate3[1].to_f32();
-        let p3 = candidate3[2].to_f32();
-
-        // Determine the fourth point
-        let p4_int = estimate_fourth_point(&candidate3);
-        let p4 = (p4_int.x as f32, p4_int.y as f32);
-        println!("The fourth point is: {:?}", p4);
-        let dst = [(24.0f32, 24.0f32), (216.0f32, 24.0f32), (216.0f32, 216.0f32), (24.0f32, 216.0f32)];
-        let src = [p1, p2, p3, (41.0 + 9.0, 192.0 - 2.0)];
-        for p in src {
-            let c_screen = Point::new(p.0 as isize, p.1 as isize);
-            // flip coordinates to match the camera data
-            // c_screen = Point::new(c_screen.x, drawable_image.dimensions().1 as isize - 1 - c_screen.y);
-            // vertical cross hair
-            glue::line(
-                &mut drawable_image,
-                Line::new_with_style(
-                    c_screen + Point::new(0, CROSSHAIR_LEN),
-                    c_screen - Point::new(0, CROSSHAIR_LEN),
-                    DrawStyle::stroke_color(Rgb([0, 255, 0]).into()),
-                ),
-                None,
-                false,
-            );
-            // horizontal cross hair
-            glue::line(
-                &mut drawable_image,
-                Line::new_with_style(
-                    c_screen + Point::new(CROSSHAIR_LEN, 0),
-                    c_screen - Point::new(CROSSHAIR_LEN, 0),
-                    DrawStyle::stroke_color(Rgb([0, 255, 0]).into()),
-                ),
-                None,
-                false,
-            );
+        let mut qr_corners = QrCorners::from_finders(
+            &candidate3,
+            image.dimensions(),
+            // add a search margin on the finder width
+            (finder_width + (FINDER_SEARCH_MARGIN * finder_width) / (1 + 1 + 3 + 1 + 1)) as usize,
+        )
+        .expect("Bad arguments to QR code finder");
+        let mut il = ImageRoi::new(&mut image, dims, BW_THRESH);
+        let (src, dst) = qr_corners.mapping(&mut il, HOMOGRAPHY_MARGIN, drawable_image);
+        for s in src.iter() {
+            if let Some(p) = s {
+                println!("src {:?}", p);
+                draw_crosshair(drawable_image, *p, [0, 255, 0]);
+            }
         }
+        for d in dst.iter() {
+            if let Some(p) = d {
+                println!("dst {:?}", p);
+                draw_crosshair(drawable_image, *p, [255, 0, 0]);
+            }
+        }
+
         show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
 
-        /*
-        // Handle to the luma version for image processing
-        let mut thinning_image = img.clone();
-        zhang_suen_thinning(&mut thinning_image, img.width() as _, img.height() as _, BW_THRESH);
-        unbinarize_image(&mut thinning_image);
-        show_image(&DynamicImage::ImageLuma8(thinning_image));
-        */
-
         let mut dest_img = RgbImage::new(image.dimensions().0, image.dimensions().1);
-        match find_homography(src, dst) {
-            Some(h) => {
-                println!("{:}", h);
-                // iterate through pixels and apply homography
-                for y in 0..image.dimensions().1 {
-                    for x in 0..image.dimensions().0 {
-                        let (x_dst, y_dst) = apply_homography(&h, (x as f32, y as f32));
-                        if (x_dst as i32 >= 0)
-                            && ((x_dst as i32) < image.dimensions().0 as i32)
-                            && (y_dst as i32 >= 0)
-                            && ((y_dst as i32) < image.dimensions().1 as i32)
-                        {
-                            // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                            dest_img.put_pixel(
-                                x_dst as u32,
-                                y_dst as u32,
-                                image.get_pixel(x as u32, y as u32).to_rgb(),
-                            );
-                        }
+        let mut src_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
+        let mut dst_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
+        let mut all_found = true;
+        for (s, s_f32) in src.iter().zip(src_f.iter_mut()) {
+            if let Some(p) = s {
+                *s_f32 = p.to_f32();
+            } else {
+                all_found = false;
+            }
+        }
+        for (d, d_f32) in dst.iter().zip(dst_f.iter_mut()) {
+            if let Some(p) = d {
+                *d_f32 = p.to_f32();
+            } else {
+                all_found = false;
+            }
+        }
+        if all_found {
+            match find_homography(src_f, dst_f) {
+                Some(h) => {
+                    println!("{:}", h);
+                    // iterate through pixels and apply homography
+                    for y in 0..image.dimensions().1 {
+                        for x in 0..image.dimensions().0 {
+                            let (x_dst, y_dst) = apply_homography(&h, (x as f32, y as f32));
+                            if (x_dst as i32 >= 0)
+                                && ((x_dst as i32) < image.dimensions().0 as i32)
+                                && (y_dst as i32 >= 0)
+                                && ((y_dst as i32) < image.dimensions().1 as i32)
+                            {
+                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
+                                dest_img.put_pixel(
+                                    x_dst as u32,
+                                    y_dst as u32,
+                                    image.get_pixel(x as u32, y as u32).to_rgb(),
+                                );
+                            }
 
-                        let (x_dst, y_dst) = apply_homography(&h, (x as f32 + 0.5, y as f32));
-                        if (x_dst as i32 >= 0)
-                            && ((x_dst as i32) < image.dimensions().0 as i32)
-                            && (y_dst as i32 >= 0)
-                            && ((y_dst as i32) < image.dimensions().1 as i32)
-                        {
-                            // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                            dest_img.put_pixel(
-                                x_dst as u32,
-                                y_dst as u32,
-                                image.get_pixel(x as u32, y as u32).to_rgb(),
-                            );
-                        }
+                            let (x_dst, y_dst) = apply_homography(&h, (x as f32 + 0.5, y as f32));
+                            if (x_dst as i32 >= 0)
+                                && ((x_dst as i32) < image.dimensions().0 as i32)
+                                && (y_dst as i32 >= 0)
+                                && ((y_dst as i32) < image.dimensions().1 as i32)
+                            {
+                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
+                                dest_img.put_pixel(
+                                    x_dst as u32,
+                                    y_dst as u32,
+                                    image.get_pixel(x as u32, y as u32).to_rgb(),
+                                );
+                            }
 
-                        let (x_dst, y_dst) = apply_homography(&h, (x as f32, y as f32 + 0.5));
-                        if (x_dst as i32 >= 0)
-                            && ((x_dst as i32) < image.dimensions().0 as i32)
-                            && (y_dst as i32 >= 0)
-                            && ((y_dst as i32) < image.dimensions().1 as i32)
-                        {
-                            // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                            dest_img.put_pixel(
-                                x_dst as u32,
-                                y_dst as u32,
-                                image.get_pixel(x as u32, y as u32).to_rgb(),
-                            );
-                        }
+                            let (x_dst, y_dst) = apply_homography(&h, (x as f32, y as f32 + 0.5));
+                            if (x_dst as i32 >= 0)
+                                && ((x_dst as i32) < image.dimensions().0 as i32)
+                                && (y_dst as i32 >= 0)
+                                && ((y_dst as i32) < image.dimensions().1 as i32)
+                            {
+                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
+                                dest_img.put_pixel(
+                                    x_dst as u32,
+                                    y_dst as u32,
+                                    image.get_pixel(x as u32, y as u32).to_rgb(),
+                                );
+                            }
 
-                        let (x_dst, y_dst) = apply_homography(&h, (x as f32 + 0.5, y as f32 + 0.5));
-                        if (x_dst as i32 >= 0)
-                            && ((x_dst as i32) < image.dimensions().0 as i32)
-                            && (y_dst as i32 >= 0)
-                            && ((y_dst as i32) < image.dimensions().1 as i32)
-                        {
-                            // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                            dest_img.put_pixel(
-                                x_dst as u32,
-                                y_dst as u32,
-                                image.get_pixel(x as u32, y as u32).to_rgb(),
-                            );
+                            let (x_dst, y_dst) = apply_homography(&h, (x as f32 + 0.5, y as f32 + 0.5));
+                            if (x_dst as i32 >= 0)
+                                && ((x_dst as i32) < image.dimensions().0 as i32)
+                                && (y_dst as i32 >= 0)
+                                && ((y_dst as i32) < image.dimensions().1 as i32)
+                            {
+                                // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
+                                dest_img.put_pixel(
+                                    x_dst as u32,
+                                    y_dst as u32,
+                                    image.get_pixel(x as u32, y as u32).to_rgb(),
+                                );
+                            }
                         }
                     }
+                    show_image(&DynamicImage::ImageRgb8(dest_img));
                 }
-                show_image(&DynamicImage::ImageRgb8(dest_img));
+                _ => println!("err"),
             }
-            _ => println!("err"),
+        } else {
+            println!("Not all points exist, can't do homography transformation");
         }
     }
 }
