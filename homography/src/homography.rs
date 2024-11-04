@@ -62,7 +62,37 @@ pub fn apply_homography(homography: &Matrix3<f32>, point: (f32, f32)) -> (f32, f
     (transformed[0] / w, transformed[1] / w)
 }
 
-const HOM_FP_SHIFT: usize = 16;
+const HOM_FP_SHIFT: i32 = 16;
+const HOM_FP_SCALE: i32 = 1 << HOM_FP_SHIFT;
+
+pub fn matrix3_to_fixp(h: Matrix3<f32>) -> Matrix3<i32> {
+    Matrix3::new(
+        (h[(0, 0)] * HOM_FP_SCALE as f32) as i32,
+        (h[(0, 1)] * HOM_FP_SCALE as f32) as i32,
+        (h[(0, 2)] * HOM_FP_SCALE as f32) as i32,
+        (h[(1, 0)] * HOM_FP_SCALE as f32) as i32,
+        (h[(1, 1)] * HOM_FP_SCALE as f32) as i32,
+        (h[(1, 2)] * HOM_FP_SCALE as f32) as i32,
+        (h[(2, 0)] * HOM_FP_SCALE as f32) as i32,
+        (h[(2, 1)] * HOM_FP_SCALE as f32) as i32,
+        (h[(2, 2)] * HOM_FP_SCALE as f32) as i32,
+    )
+}
+
+pub fn apply_fixp_homography(homography: &Matrix3<i32>, point: (i32, i32)) -> (i32, i32) {
+    let (x, y) = point;
+
+    // Transform the point using fixed-point arithmetic
+    let tx = (homography[(0, 0)] * x + homography[(0, 1)] * y + homography[(0, 2)]);
+    let ty = (homography[(1, 0)] * x + homography[(1, 1)] * y + homography[(1, 2)]);
+    let tw = (homography[(2, 0)] * x + homography[(2, 1)] * y + homography[(2, 2)]);
+
+    // Normalize by w to get the final coordinates
+    let x_transformed = tx / tw;
+    let y_transformed = ty / tw;
+
+    (x_transformed, y_transformed)
+}
 
 pub fn apply_inverse_homography(inv_homography: &Matrix3<f32>, point: (f32, f32)) -> (f32, f32) {
     let (x, y) = point;

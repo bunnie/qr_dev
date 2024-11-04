@@ -6,8 +6,7 @@ use qr::*;
 mod minigfx;
 use minigfx::*;
 mod glue;
-use image::{DynamicImage, GenericImageView, GrayImage, Luma, Rgb, RgbImage, RgbaImage};
-use image::{ImageBuffer, Pixel};
+use image::{DynamicImage, GenericImageView, Pixel, Rgb, RgbImage, RgbaImage};
 use minifb::{Key, Window, WindowOptions};
 
 fn show_image(flipped_img: &DynamicImage) {
@@ -169,11 +168,13 @@ fn main() {
             match find_homography(src_f, dst_f) {
                 Some(h) => {
                     if let Some(h_inv) = h.try_inverse() {
-                        println!("{:}", h_inv);
+                        println!("{:?}", h_inv);
+                        let h_inv_fp = matrix3_to_fixp(h_inv);
+                        println!("{:?}", h_inv_fp);
                         // iterate through pixels and apply homography
                         for y in 0..image.dimensions().1 {
                             for x in 0..image.dimensions().0 {
-                                let (x_src, y_src) = apply_inverse_homography(&h_inv, (x as f32, y as f32));
+                                let (x_src, y_src) = apply_fixp_homography(&h_inv_fp, (x as i32, y as i32));
                                 if (x_src as i32 >= 0)
                                     && ((x_src as i32) < image.dimensions().0 as i32)
                                     && (y_src as i32 >= 0)
