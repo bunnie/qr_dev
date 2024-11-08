@@ -344,6 +344,16 @@ impl QrCorners {
     /// was made, with a margin added.
     ///
     /// The margin should be negative for the corners to go in toward the center.
+    ///
+    /// Canonical orientation for QR code should be like this:
+    ///   +------+
+    ///   |O    .|
+    ///   |      |
+    /// ^ |O    O|
+    /// | +______+
+    /// (0,0) ->
+    ///
+    /// Thus we want to orient so the discovered corner is in the NorthEast direction.
     pub fn mapping(
         &mut self,
         ir: &mut ImageRoi,
@@ -355,6 +365,7 @@ impl QrCorners {
 
         let mut src = [None; 4];
         let mut dst = [None; 4];
+        let mut uk_direction: Option<Direction> = None;
 
         for (i, corner) in self.corners.iter().enumerate() {
             if let Some(_p) = corner.finder_ref {
@@ -370,6 +381,7 @@ impl QrCorners {
                 // derive the corner from the extracted h and v lines along the finder pattern
                 src[i] = point_from_hv_lines(&corner.h_line, &corner.v_line);
             } else {
+                uk_direction = Direction::try_from(i).ok();
                 // This is the unknown corner:
                 // derive the corner from the h and v lines from the nearest finders' lines
                 let h_line = match Direction::try_from(i) {
@@ -405,7 +417,21 @@ impl QrCorners {
             };
         }
 
-        (src, dst)
+        // now shuffle the dst points such that the unknown corner is in the
+        // NorthEast direction
+        let mut shuffle: [Option<Point>; 4] = [None; 4];
+        shuffle.copy_from_slice(&dst);
+        if let Some(uk_corner) = uk_direction {
+            let corner_index: usize = uk_corner.into();
+            if corner_index != 0 {
+                for _ in 0..corner_index {
+                    shuffle[1..].copy_from_slice(&dst[..3]);
+                    shuffle[0] = dst[3];
+                    dst.copy_from_slice(&shuffle);
+                }
+            }
+        }
+        (src, shuffle)
     }
 }
 
@@ -472,10 +498,10 @@ impl BitXor for Color {
 /// We use Direction as both a way to encode a meaning and a unique array index.
 #[repr(usize)]
 pub enum Direction {
-    NorthWest = 0,
-    NorthEast = 1,
+    NorthEast = 0,
+    SouthEast = 1,
     SouthWest = 2,
-    SouthEast = 3,
+    NorthWest = 3,
     North = 4,
     West = 5,
     East = 6,
@@ -503,10 +529,10 @@ impl Into<usize> for Direction {
     fn into(self) -> usize {
         use Direction::*;
         match self {
-            NorthWest => 0,
-            NorthEast => 1,
+            NorthEast => 0,
+            SouthEast => 1,
             SouthWest => 2,
-            SouthEast => 3,
+            NorthWest => 3,
             North => 4,
             West => 5,
             East => 6,
@@ -520,10 +546,10 @@ impl TryFrom<usize> for Direction {
     fn try_from(value: usize) -> Result<Self, Self::Error> {
         use Direction::*;
         match value {
-            0 => Ok(NorthWest),
-            1 => Ok(NorthEast),
+            0 => Ok(NorthEast),
+            1 => Ok(SouthEast),
             2 => Ok(SouthWest),
-            3 => Ok(SouthEast),
+            3 => Ok(NorthWest),
             4 => Ok(North),
             5 => Ok(West),
             6 => Ok(East),
