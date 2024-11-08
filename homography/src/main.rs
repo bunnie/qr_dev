@@ -6,8 +6,11 @@ use qr::*;
 mod minigfx;
 use minigfx::*;
 mod glue;
+mod modules;
+mod version_db;
 use image::{DynamicImage, GenericImageView, Pixel, Rgb, RgbImage, RgbaImage};
 use minifb::{Key, Window, WindowOptions};
+use modules::*;
 
 fn show_image(flipped_img: &DynamicImage) {
     // Get image dimensions and raw pixel data
@@ -41,7 +44,7 @@ const BW_THRESH: u8 = 128;
 /// resolution of the code)
 const FINDER_SEARCH_MARGIN: isize = 2;
 /// How much we want the final QR image to be "pulled in" from the outer edge of the image buffer
-const HOMOGRAPHY_MARGIN: isize = -4;
+const HOMOGRAPHY_MARGIN: isize = -8;
 const CROSSHAIR_LEN: isize = 3;
 
 fn draw_crosshair(image: &mut RgbImage, p: Point, color: [u8; 3]) {
@@ -192,6 +195,27 @@ fn main() {
                             }
                         }
                         show_image(&DynamicImage::ImageRgb8(dest_img));
+
+                        #[cfg(feature = "rqrr")]
+                        {
+                            let decode_img_rgb = DynamicImage::ImageRgb8(dest_img.clone());
+                            let decode_img = decode_img_rgb.into_luma8();
+                            show_image(&DynamicImage::ImageRgb8(dest_img));
+
+                            let mut search_img = rqrr::PreparedImage::prepare(decode_img);
+                            let grids = search_img.detect_grids();
+                            println!("grids len {}", grids.len());
+                            let rawdata = grids[0].get_raw_data();
+                            match rawdata {
+                                Ok((md, rd)) => {
+                                    println!("{:?}, {}:{:x?}", md, rd.len, &rd.data[..(rd.len / 8) + 1]);
+                                }
+                                Err(e) => {
+                                    println!("Error: {:?}", e);
+                                }
+                            }
+                            println!("{:?}", grids[0].decode());
+                        }
                     } else {
                         println!("Matrix is not invertable");
                     }
