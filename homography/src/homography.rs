@@ -83,22 +83,13 @@ pub fn apply_fixp_homography(homography: &Matrix3<i32>, point: (i32, i32)) -> (i
     let (x, y) = point;
 
     // Transform the point using fixed-point arithmetic
-    let tx = (homography[(0, 0)] * x + homography[(0, 1)] * y + homography[(0, 2)]);
-    let ty = (homography[(1, 0)] * x + homography[(1, 1)] * y + homography[(1, 2)]);
-    let tw = (homography[(2, 0)] * x + homography[(2, 1)] * y + homography[(2, 2)]);
+    let tx = homography[(0, 0)] * x + homography[(0, 1)] * y + homography[(0, 2)];
+    let ty = homography[(1, 0)] * x + homography[(1, 1)] * y + homography[(1, 2)];
+    let tw = homography[(2, 0)] * x + homography[(2, 1)] * y + homography[(2, 2)];
 
     // Normalize by w to get the final coordinates
     let x_transformed = tx / tw;
     let y_transformed = ty / tw;
 
     (x_transformed, y_transformed)
-}
-
-pub fn apply_inverse_homography(inv_homography: &Matrix3<f32>, point: (f32, f32)) -> (f32, f32) {
-    let (x, y) = point;
-    let transformed = inv_homography * Vector3::new(x, y, 1.0);
-
-    // Normalize the homogeneous coordinates
-    let w = transformed[2];
-    (transformed[0] / w, transformed[1] / w)
 }
