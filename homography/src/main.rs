@@ -97,6 +97,7 @@ fn main() {
     // Load the PNG file
     let mut img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
     let dims = img.dimensions();
+    println!("dimensions: {:?}", dims);
     // Handle to the luma version for image processing
     let mut image = &mut img;
     // Create an RGB version for UI debugging
@@ -149,7 +150,7 @@ fn main() {
 
         show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
 
-        let mut dest_img = RgbImage::new(image.dimensions().0, image.dimensions().1);
+        let mut dest_img = RgbImage::new(qr_corners.qr_pixels() as u32, qr_corners.qr_pixels() as u32);
         let mut src_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
         let mut dst_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
         let mut all_found = true;
@@ -170,13 +171,13 @@ fn main() {
         if all_found {
             match find_homography(src_f, dst_f) {
                 Some(h) => {
-                    if let Some(h_inv) = h.try_inverse() {
+                    if let Some(h_invz) = h.try_inverse() {
                         println!("{:?}", h_inv);
                         let h_inv_fp = matrix3_to_fixp(h_inv);
                         println!("{:?}", h_inv_fp);
                         // iterate through pixels and apply homography
-                        for y in 0..image.dimensions().1 {
-                            for x in 0..image.dimensions().0 {
+                        for y in 0..qr_corners.qr_pixels() {
+                            for x in 0..qr_corners.qr_pixels() {
                                 let (x_src, y_src) = apply_fixp_homography(&h_inv_fp, (x as i32, y as i32));
                                 if (x_src as i32 >= 0)
                                     && ((x_src as i32) < image.dimensions().0 as i32)
@@ -190,11 +191,30 @@ fn main() {
                                         image.get_pixel(x_src as u32, y_src as u32).to_rgb(),
                                     );
                                 } else {
-                                    dest_img.put_pixel(x, y, Rgb([255, 255, 255]));
+                                    dest_img.put_pixel(x as u32, y as u32, Rgb([255, 255, 255]));
                                 }
                             }
                         }
+
+                        // we now have a QR code in "canonical" orientation, with a
+                        // known width in pixels
+                        let qr_width = qr_corners.qr_pixels();
+
+                        // we can also know the location of the finders by transforming them
+                        let mut x_candidates: [Point; 3] = [Point::new(0, 0); 3];
+                        let h_fp = matrix3_to_fixp(h);
+                        for (i, &c) in candidate3.iter().enumerate() {
+                            let (x, y) = apply_fixp_homography(&h_fp, (c.x as i32, c.y as i32));
+                            x_candidates[i] = Point::new(x as isize, y as isize);
+                        }
+
+                        for &x in x_candidates.iter() {
+                            println!("transformed finder location {:?}", x);
+                            draw_crosshair(&mut dest_img, x, [0, 255, 0]);
+                        }
                         show_image(&DynamicImage::ImageRgb8(dest_img));
+
+                        // Confirm that the finders coordinates are valid
 
                         #[cfg(feature = "rqrr")]
                         {
