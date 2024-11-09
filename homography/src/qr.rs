@@ -224,6 +224,8 @@ pub struct QrCorners {
     height: isize,
     derived_corner: Direction,
     finder_width: usize,
+    // destination QR image in pixels per side (as a perfect square)
+    dst_pixels: usize,
 }
 impl QrCorners {
     pub fn from_finders(points: &[Point; 3], dimensions: (u32, u32), finder_width: usize) -> Option<Self> {
@@ -235,6 +237,7 @@ impl QrCorners {
         qrc.width = widthu32 as isize;
         qrc.height = heightu32 as isize;
         qrc.finder_width = finder_width;
+        qrc.dst_pixels = widthu32.min(heightu32) as usize;
 
         for &p in points {
             if p.x < x_half && p.y < y_half {
@@ -360,6 +363,9 @@ impl QrCorners {
         margin: isize,
         debug: &mut RgbImage,
     ) -> ([Option<Point>; 4], [Option<Point>; 4]) {
+        // adjust the final target image size by the specified margin
+        self.dst_pixels = (self.dst_pixels as isize + 2 * margin) as usize;
+
         // first, search for the lines that define the outline of the QR code
         self.outline_search(ir);
 
@@ -408,11 +414,13 @@ impl QrCorners {
                 }
                 src[i] = point_from_hv_lines(h_line, v_line);
             }
+            let min = -margin;
+            let max = self.dst_pixels as isize + margin;
             dst[i] = match Direction::try_from(i) {
-                Ok(Direction::NorthWest) => Some(Point::new(-margin, self.height + margin)),
-                Ok(Direction::NorthEast) => Some(Point::new(self.width + margin, self.height + margin)),
-                Ok(Direction::SouthWest) => Some(Point::new(-margin, -margin)),
-                Ok(Direction::SouthEast) => Some(Point::new(self.width + margin, -margin)),
+                Ok(Direction::NorthWest) => Some(Point::new(min, max)),
+                Ok(Direction::NorthEast) => Some(Point::new(max, max)),
+                Ok(Direction::SouthWest) => Some(Point::new(min, min)),
+                Ok(Direction::SouthEast) => Some(Point::new(max, min)),
                 _ => None,
             };
         }
@@ -433,6 +441,8 @@ impl QrCorners {
         }
         (src, shuffle)
     }
+
+    pub fn qr_pixels(&self) -> usize { self.dst_pixels }
 }
 
 #[derive(Copy, Clone, Default, Debug)]
