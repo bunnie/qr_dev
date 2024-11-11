@@ -1,5 +1,7 @@
 mod homography;
 
+use std::{fs::exists, process::exit};
+
 use homography::*;
 mod qr;
 use qr::*;
@@ -117,159 +119,161 @@ fn main() {
         println!("******    candidate: {}, {}    ******", candidate.x, candidate.y);
     }
 
-    if candidates.len() == 3 {
-        let candidates_orig = candidates.clone();
-        let mut qr_corners = QrCorners::from_finders(
-            &candidates.try_into().unwrap(),
-            image.dimensions(),
-            // add a search margin on the finder width
-            (finder_width + (FINDER_SEARCH_MARGIN * finder_width) / (1 + 1 + 3 + 1 + 1)) as usize,
-        )
-        .expect("Bad arguments to QR code finder");
-        let mut il = ImageRoi::new(&mut image, dims, BW_THRESH);
-        let (src, dst) = qr_corners.mapping(&mut il, HOMOGRAPHY_MARGIN, drawable_image);
-        for s in src.iter() {
-            if let Some(p) = s {
-                println!("src {:?}", p);
-                draw_crosshair(drawable_image, *p, [0, 255, 0]);
-            }
+    if candidates.len() != 3 {
+        println!("Did not find a unique set of QR finder regions");
+        exit(0);
+    }
+
+    let candidates_orig = candidates.clone();
+    let mut qr_corners = QrCorners::from_finders(
+        &candidates.try_into().unwrap(),
+        image.dimensions(),
+        // add a search margin on the finder width
+        (finder_width + (FINDER_SEARCH_MARGIN * finder_width) / (1 + 1 + 3 + 1 + 1)) as usize,
+    )
+    .expect("Bad arguments to QR code finder");
+    let mut il = ImageRoi::new(&mut image, dims, BW_THRESH);
+    let (src, dst) = qr_corners.mapping(&mut il, HOMOGRAPHY_MARGIN, drawable_image);
+    for s in src.iter() {
+        if let Some(p) = s {
+            println!("src {:?}", p);
+            draw_crosshair(drawable_image, *p, [0, 255, 0]);
         }
-        for d in dst.iter() {
-            if let Some(p) = d {
-                println!("dst {:?}", p);
-                draw_crosshair(drawable_image, *p, [255, 0, 0]);
-            }
+    }
+    for d in dst.iter() {
+        if let Some(p) = d {
+            println!("dst {:?}", p);
+            draw_crosshair(drawable_image, *p, [255, 0, 0]);
         }
+    }
 
-        show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
+    show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
 
-        let mut dest_img = GrayImage::new(qr_corners.qr_pixels() as u32, qr_corners.qr_pixels() as u32);
-        let mut src_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
-        let mut dst_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
-        let mut all_found = true;
-        for (s, s_f32) in src.iter().zip(src_f.iter_mut()) {
-            if let Some(p) = s {
-                *s_f32 = p.to_f32();
-            } else {
-                all_found = false;
-            }
+    let mut dest_img = GrayImage::new(qr_corners.qr_pixels() as u32, qr_corners.qr_pixels() as u32);
+    let mut src_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
+    let mut dst_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
+    let mut all_found = true;
+    for (s, s_f32) in src.iter().zip(src_f.iter_mut()) {
+        if let Some(p) = s {
+            *s_f32 = p.to_f32();
+        } else {
+            all_found = false;
         }
-        for (d, d_f32) in dst.iter().zip(dst_f.iter_mut()) {
-            if let Some(p) = d {
-                *d_f32 = p.to_f32();
-            } else {
-                all_found = false;
-            }
+    }
+    for (d, d_f32) in dst.iter().zip(dst_f.iter_mut()) {
+        if let Some(p) = d {
+            *d_f32 = p.to_f32();
+        } else {
+            all_found = false;
         }
-        if all_found {
-            match find_homography(src_f, dst_f) {
-                Some(h) => {
-                    if let Some(h_inv) = h.try_inverse() {
-                        println!("{:?}", h_inv);
-                        let h_inv_fp = matrix3_to_fixp(h_inv);
-                        println!("{:?}", h_inv_fp);
-                        // iterate through pixels and apply homography
-                        for y in 0..qr_corners.qr_pixels() {
-                            for x in 0..qr_corners.qr_pixels() {
-                                let (x_src, y_src) = apply_fixp_homography(&h_inv_fp, (x as i32, y as i32));
-                                if (x_src as i32 >= 0)
-                                    && ((x_src as i32) < image.dimensions().0 as i32)
-                                    && (y_src as i32 >= 0)
-                                    && ((y_src as i32) < image.dimensions().1 as i32)
-                                {
-                                    // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
-                                    dest_img.put_pixel(
-                                        x as u32,
-                                        y as u32,
-                                        image.get_pixel(x_src as u32, y_src as u32).to_luma(),
-                                    );
-                                } else {
-                                    dest_img.put_pixel(x as u32, y as u32, Luma([255]));
-                                }
-                            }
-                        }
-
-                        // we now have a QR code in "canonical" orientation, with a
-                        // known width in pixels
-                        let qr_width = qr_corners.qr_pixels();
-
-                        // we can also know the location of the finders by transforming them
-                        let mut x_candidates: [Point; 3] = [Point::new(0, 0); 3];
-                        let h_fp = matrix3_to_fixp(h);
-                        for (i, &c) in candidates_orig.iter().enumerate() {
-                            let (x, y) = apply_fixp_homography(&h_fp, (c.x as i32, c.y as i32));
-                            x_candidates[i] = Point::new(x as isize, y as isize);
-                        }
-
-                        let mut debug_qr_image = RgbImage::new(qr_width as _, qr_width as _);
-                        for (x, y, pixel) in dest_img.enumerate_pixels() {
-                            let luma = pixel[0];
-                            debug_qr_image.put_pixel(x, y, Rgb([luma, luma, luma]));
-                        }
-
-                        for &x in x_candidates.iter() {
-                            println!("transformed finder location {:?}", x);
-                            draw_crosshair(&mut debug_qr_image, x, [0, 255, 0]);
-                        }
-                        show_image(&DynamicImage::ImageRgb8(debug_qr_image.clone()));
-
-                        // Confirm that the finders coordinates are valid
-                        let mut checked_candidates = Vec::<Point>::new();
-                        let x_finder_width =
-                            qr::find_finders(&mut checked_candidates, &dest_img, BW_THRESH, qr_width as _)
-                                as isize;
-
-                        println!("x_finder width: {}", x_finder_width);
-                        // check that the new coordinates are within 1 pixel of the original
-                        const XFORM_DELTA: isize = 1;
-                        let mut deltas = Vec::<Point>::new();
-                        for c in checked_candidates {
-                            println!("x_point: {:?}", c);
-                            for &xformed in x_candidates.iter() {
-                                let delta = xformed - c;
-                                if delta.x.abs() <= XFORM_DELTA && delta.y.abs() <= XFORM_DELTA {
-                                    deltas.push(delta);
-                                    println!("delta: {:?}", delta);
-                                }
-                            }
-                        }
-                        if deltas.len() != 3 {
-                            println!("Transformation did not survive sanity check");
-                            return;
-                        }
-                        let (version, modules) = qr::guess_code_version(x_finder_width as usize, qr_width);
-
-                        println!("width: {}, image dims: {:?}", qr_width, dest_img.dimensions());
-                        println!("guessed version: {}, modules: {}", version, modules);
-
-                        #[cfg(feature = "rqrr")]
+    }
+    if !all_found {
+        println!("Not all points exist, can't do homography transformation");
+        exit(0)
+    }
+    let mut x_candidates: [Point; 3] = [Point::new(0, 0); 3];
+    match find_homography(src_f, dst_f) {
+        Some(h) => {
+            if let Some(h_inv) = h.try_inverse() {
+                println!("{:?}", h_inv);
+                let h_inv_fp = matrix3_to_fixp(h_inv);
+                println!("{:?}", h_inv_fp);
+                // iterate through pixels and apply homography
+                for y in 0..qr_corners.qr_pixels() {
+                    for x in 0..qr_corners.qr_pixels() {
+                        let (x_src, y_src) = apply_fixp_homography(&h_inv_fp, (x as i32, y as i32));
+                        if (x_src as i32 >= 0)
+                            && ((x_src as i32) < image.dimensions().0 as i32)
+                            && (y_src as i32 >= 0)
+                            && ((y_src as i32) < image.dimensions().1 as i32)
                         {
-                            let decode_img_rgb = DynamicImage::ImageRgb8(dest_img.clone());
-                            let decode_img = decode_img_rgb.into_luma8();
-                            show_image(&DynamicImage::ImageRgb8(dest_img));
-
-                            let mut search_img = rqrr::PreparedImage::prepare(decode_img);
-                            let grids = search_img.detect_grids();
-                            println!("grids len {}", grids.len());
-                            let rawdata = grids[0].get_raw_data();
-                            match rawdata {
-                                Ok((md, rd)) => {
-                                    println!("{:?}, {}:{:x?}", md, rd.len, &rd.data[..(rd.len / 8) + 1]);
-                                }
-                                Err(e) => {
-                                    println!("Error: {:?}", e);
-                                }
-                            }
-                            println!("{:?}", grids[0].decode());
+                            // println!("{},{} -> {},{}", x_src as i32, y_src as i32, x, y);
+                            dest_img.put_pixel(
+                                x as u32,
+                                y as u32,
+                                image.get_pixel(x_src as u32, y_src as u32).to_luma(),
+                            );
+                        } else {
+                            dest_img.put_pixel(x as u32, y as u32, Luma([255]));
                         }
-                    } else {
-                        println!("Matrix is not invertable");
                     }
                 }
-                _ => println!("err"),
+
+                // we can also know the location of the finders by transforming them
+                let h_fp = matrix3_to_fixp(h);
+                for (i, &c) in candidates_orig.iter().enumerate() {
+                    let (x, y) = apply_fixp_homography(&h_fp, (c.x as i32, c.y as i32));
+                    x_candidates[i] = Point::new(x as isize, y as isize);
+                }
+            } else {
+                println!("Matrix is not invertible");
             }
-        } else {
-            println!("Not all points exist, can't do homography transformation");
         }
+        _ => println!("err"),
+    }
+
+    // we now have a QR code in "canonical" orientation, with a
+    // known width in pixels
+    let qr_width = qr_corners.qr_pixels();
+
+    let mut debug_qr_image = RgbImage::new(qr_width as _, qr_width as _);
+    for (x, y, pixel) in dest_img.enumerate_pixels() {
+        let luma = pixel[0];
+        debug_qr_image.put_pixel(x, y, Rgb([luma, luma, luma]));
+    }
+
+    for &x in x_candidates.iter() {
+        println!("transformed finder location {:?}", x);
+        draw_crosshair(&mut debug_qr_image, x, [0, 255, 0]);
+    }
+    show_image(&DynamicImage::ImageRgb8(debug_qr_image.clone()));
+
+    // Confirm that the finders coordinates are valid
+    let mut checked_candidates = Vec::<Point>::new();
+    let x_finder_width =
+        qr::find_finders(&mut checked_candidates, &dest_img, BW_THRESH, qr_width as _) as isize;
+
+    println!("x_finder width: {}", x_finder_width);
+    // check that the new coordinates are within 1 pixel of the original
+    const XFORM_DELTA: isize = 1;
+    let mut deltas = Vec::<Point>::new();
+    for c in checked_candidates {
+        println!("x_point: {:?}", c);
+        for &xformed in x_candidates.iter() {
+            let delta = xformed - c;
+            if delta.x.abs() <= XFORM_DELTA && delta.y.abs() <= XFORM_DELTA {
+                deltas.push(delta);
+                println!("delta: {:?}", delta);
+            }
+        }
+    }
+    if deltas.len() != 3 {
+        println!("Transformation did not survive sanity check");
+        return;
+    }
+    let (version, modules) = qr::guess_code_version(x_finder_width as usize, qr_width);
+
+    println!("width: {}, image dims: {:?}", qr_width, dest_img.dimensions());
+    println!("guessed version: {}, modules: {}", version, modules);
+
+    #[cfg(feature = "rqrr")]
+    {
+        let decode_img_rgb = DynamicImage::ImageRgb8(dest_img.clone());
+        let decode_img = decode_img_rgb.into_luma8();
+        show_image(&DynamicImage::ImageRgb8(dest_img));
+
+        let mut search_img = rqrr::PreparedImage::prepare(decode_img);
+        let grids = search_img.detect_grids();
+        println!("grids len {}", grids.len());
+        let rawdata = grids[0].get_raw_data();
+        match rawdata {
+            Ok((md, rd)) => {
+                println!("{:?}, {}:{:x?}", md, rd.len, &rd.data[..(rd.len / 8) + 1]);
+            }
+            Err(e) => {
+                println!("Error: {:?}", e);
+            }
+        }
+        println!("{:?}", grids[0].decode());
     }
 }
