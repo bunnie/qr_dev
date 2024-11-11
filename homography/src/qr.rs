@@ -1,6 +1,11 @@
 const SEQ_LEN: usize = 5;
 use core::cell::RefCell;
-use std::ops::{BitXor, Not};
+use std::{
+    ops::{BitXor, Not},
+    usize,
+};
+
+use version_db::{MODULES_BY_VERSION, VERSION_DATA_BASE};
 
 use super::*;
 
@@ -958,8 +963,74 @@ impl SeqBuffer {
     }
 }
 
+#[cfg(feature = "std")]
+/// Returns the average width of the finder regions found.
+pub fn find_finders(candidates: &mut Vec<Point>, image: &[u8], thresh: u8, stride: usize) -> usize {
+    let mut row_candidates = Vec::<Point>::new();
+
+    let mut seq_buffer = SeqBuffer::new();
+
+    // println!("ROWSROWSROWSROWS");
+    for (y, line) in image.chunks(stride).enumerate() {
+        seq_buffer.clear();
+        let mut last_color = Color::from(line[0], thresh);
+        let mut run_length = 1;
+
+        for (x_minus1, &pix) in line[1..].iter().enumerate() {
+            let pix = Color::from(pix, thresh);
+            if pix == last_color {
+                run_length += 1;
+            } else {
+                seq_buffer.push(FinderSeq { run: run_length, pos: x_minus1 + 1, color: last_color });
+                last_color = pix;
+                run_length = 1;
+
+                // manage the sequence index
+                if let Some((pos, _width)) = seq_buffer.search() {
+                    // println!("row candidate {}, {}", pos, y);
+                    row_candidates.push(Point::new(pos as _, y as _));
+                }
+            }
+        }
+    }
+
+    // println!("CCCCCCCCCCCCCCCC");
+    let mut candidate_width = 0;
+    for x in 0..stride {
+        seq_buffer.clear();
+
+        let mut last_color = Color::from(image[x], thresh);
+        let mut run_length = 1;
+        // could rewrite this to abort the search after more than 3 finders are found, but for now,
+        // do an exhaustive search because it's useful info for debugging.
+        for (y_minus1, row) in image[x + stride..].chunks(stride).enumerate() {
+            let pix = Color::from(row[0], thresh);
+            if pix == last_color {
+                run_length += 1;
+            } else {
+                seq_buffer.push(FinderSeq { run: run_length, pos: y_minus1 + 1, color: last_color });
+                last_color = pix;
+                run_length = 1;
+                if let Some((pos, width)) = seq_buffer.search() {
+                    let search_point = Point::new(x as _, pos as _);
+                    // println!("col candidate {}, {}", x, pos);
+
+                    // now cross the candidate against row candidates; only report those that match
+                    for &rc in row_candidates.iter().filter(|&&p| p == search_point) {
+                        candidates.push(rc);
+                        candidate_width += width;
+                    }
+                }
+            }
+        }
+    }
+    if candidates.len() != 0 { candidate_width / candidates.len() } else { 0 }
+}
+
+#[cfg(not(feature = "std"))]
 const ROW_LIMIT: usize = 128;
 /// Returns the average width of the finder regions found.
+#[cfg(not(feature = "std"))]
 pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, stride: usize) -> usize {
     let mut row_candidates: [Option<Point>; ROW_LIMIT] = [None; ROW_LIMIT];
 
@@ -1048,4 +1119,30 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
         }
     }
     candidate_width / candidate_index
+}
+
+const FP_SHIFT: usize = (1 << 16);
+/// Returns tuple of (version, expected_modules)
+pub fn guess_code_version(finder_width: usize, qr_modules: usize) -> (usize, usize) {
+    let incoming_ratio = ((qr_modules * FP_SHIFT) / finder_width) as isize;
+    let mut candidate_ratio = usize::MAX;
+    let mut candidate = 0;
+    let mut returned_modules = 0;
+    for (i, &modules) in MODULES_BY_VERSION.iter().enumerate() {
+        let version_ratio = ((modules * FP_SHIFT) / 7) as isize;
+        println!(
+            "{}: version_ratio {} incoming_ratio {} diff {}",
+            i + 1,
+            version_ratio,
+            incoming_ratio,
+            version_ratio - incoming_ratio
+        );
+        let prev_candidate = candidate_ratio;
+        candidate_ratio = candidate_ratio.min((version_ratio - incoming_ratio).abs() as usize);
+        if prev_candidate != candidate_ratio {
+            candidate = i + 1;
+            returned_modules = modules;
+        }
+    }
+    (candidate, returned_modules)
 }
