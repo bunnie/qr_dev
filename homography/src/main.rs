@@ -8,7 +8,7 @@ use minigfx::*;
 mod glue;
 mod modules;
 mod version_db;
-use image::{DynamicImage, GenericImageView, Pixel, Rgb, RgbImage, RgbaImage};
+use image::{DynamicImage, GenericImageView, GrayImage, Luma, Pixel, Rgb, RgbImage, RgbaImage};
 use minifb::{Key, Window, WindowOptions};
 use modules::*;
 
@@ -110,24 +110,17 @@ fn main() {
 
     // Get image dimensions and raw pixel data
     let (width, _height) = dims;
-    let mut candidates: [Option<Point>; 8] = [None; 8];
-    let finder_width = find_finders(&mut candidates, &image, BW_THRESH, width as _) as isize;
+    let mut candidates = Vec::<Point>::new();
+    let finder_width = qr::find_finders(&mut candidates, &image, BW_THRESH, width as _) as isize;
 
-    let mut candidates_found = 0;
-    let mut candidate3 = [Point::new(0, 0); 3];
-    for candidate in candidates.iter() {
-        if let Some(c) = candidate {
-            if candidates_found < candidate3.len() {
-                candidate3[candidates_found] = *c;
-            }
-            candidates_found += 1;
-            println!("******    candidate: {}, {}    ******", c.x, c.y);
-        }
+    for &candidate in candidates.iter() {
+        println!("******    candidate: {}, {}    ******", candidate.x, candidate.y);
     }
 
-    if candidates_found == 3 {
+    if candidates.len() == 3 {
+        let candidates_orig = candidates.clone();
         let mut qr_corners = QrCorners::from_finders(
-            &candidate3,
+            &candidates.try_into().unwrap(),
             image.dimensions(),
             // add a search margin on the finder width
             (finder_width + (FINDER_SEARCH_MARGIN * finder_width) / (1 + 1 + 3 + 1 + 1)) as usize,
@@ -150,7 +143,7 @@ fn main() {
 
         show_image(&DynamicImage::ImageRgb8(drawable_image.clone()));
 
-        let mut dest_img = RgbImage::new(qr_corners.qr_pixels() as u32, qr_corners.qr_pixels() as u32);
+        let mut dest_img = GrayImage::new(qr_corners.qr_pixels() as u32, qr_corners.qr_pixels() as u32);
         let mut src_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
         let mut dst_f: [(f32, f32); 4] = [(0.0, 0.0); 4];
         let mut all_found = true;
@@ -171,7 +164,7 @@ fn main() {
         if all_found {
             match find_homography(src_f, dst_f) {
                 Some(h) => {
-                    if let Some(h_invz) = h.try_inverse() {
+                    if let Some(h_inv) = h.try_inverse() {
                         println!("{:?}", h_inv);
                         let h_inv_fp = matrix3_to_fixp(h_inv);
                         println!("{:?}", h_inv_fp);
@@ -188,10 +181,10 @@ fn main() {
                                     dest_img.put_pixel(
                                         x as u32,
                                         y as u32,
-                                        image.get_pixel(x_src as u32, y_src as u32).to_rgb(),
+                                        image.get_pixel(x_src as u32, y_src as u32).to_luma(),
                                     );
                                 } else {
-                                    dest_img.put_pixel(x as u32, y as u32, Rgb([255, 255, 255]));
+                                    dest_img.put_pixel(x as u32, y as u32, Luma([255]));
                                 }
                             }
                         }
@@ -203,18 +196,51 @@ fn main() {
                         // we can also know the location of the finders by transforming them
                         let mut x_candidates: [Point; 3] = [Point::new(0, 0); 3];
                         let h_fp = matrix3_to_fixp(h);
-                        for (i, &c) in candidate3.iter().enumerate() {
+                        for (i, &c) in candidates_orig.iter().enumerate() {
                             let (x, y) = apply_fixp_homography(&h_fp, (c.x as i32, c.y as i32));
                             x_candidates[i] = Point::new(x as isize, y as isize);
                         }
 
+                        let mut debug_qr_image = RgbImage::new(qr_width as _, qr_width as _);
+                        for (x, y, pixel) in dest_img.enumerate_pixels() {
+                            let luma = pixel[0];
+                            debug_qr_image.put_pixel(x, y, Rgb([luma, luma, luma]));
+                        }
+
                         for &x in x_candidates.iter() {
                             println!("transformed finder location {:?}", x);
-                            draw_crosshair(&mut dest_img, x, [0, 255, 0]);
+                            draw_crosshair(&mut debug_qr_image, x, [0, 255, 0]);
                         }
-                        show_image(&DynamicImage::ImageRgb8(dest_img));
+                        show_image(&DynamicImage::ImageRgb8(debug_qr_image.clone()));
 
                         // Confirm that the finders coordinates are valid
+                        let mut checked_candidates = Vec::<Point>::new();
+                        let x_finder_width =
+                            qr::find_finders(&mut checked_candidates, &dest_img, BW_THRESH, qr_width as _)
+                                as isize;
+
+                        println!("x_finder width: {}", x_finder_width);
+                        // check that the new coordinates are within 1 pixel of the original
+                        const XFORM_DELTA: isize = 1;
+                        let mut deltas = Vec::<Point>::new();
+                        for c in checked_candidates {
+                            println!("x_point: {:?}", c);
+                            for &xformed in x_candidates.iter() {
+                                let delta = xformed - c;
+                                if delta.x.abs() <= XFORM_DELTA && delta.y.abs() <= XFORM_DELTA {
+                                    deltas.push(delta);
+                                    println!("delta: {:?}", delta);
+                                }
+                            }
+                        }
+                        if deltas.len() != 3 {
+                            println!("Transformation did not survive sanity check");
+                            return;
+                        }
+                        let (version, modules) = qr::guess_code_version(x_finder_width as usize, qr_width);
+
+                        println!("width: {}, image dims: {:?}", qr_width, dest_img.dimensions());
+                        println!("guessed version: {}, modules: {}", version, modules);
 
                         #[cfg(feature = "rqrr")]
                         {
