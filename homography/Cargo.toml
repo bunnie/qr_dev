@@ -12,3 +12,5 @@ rqrr = "0.8.0"
 
 [features]
 rqrr = []
+std = []
+default = ["std"]
