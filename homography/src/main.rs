@@ -258,9 +258,15 @@ fn main() {
 
     #[cfg(feature = "rqrr")]
     {
-        let decode_img_rgb = DynamicImage::ImageRgb8(dest_img.clone());
+        let mut debug_qr_image = RgbImage::new(qr_width as _, qr_width as _);
+        for (x, y, pixel) in dest_img.enumerate_pixels() {
+            let luma = pixel[0];
+            debug_qr_image.put_pixel(x, y, Rgb([luma, luma, luma]));
+        }
+
+        let decode_img_rgb = DynamicImage::ImageRgb8(debug_qr_image.clone());
         let decode_img = decode_img_rgb.into_luma8();
-        show_image(&DynamicImage::ImageRgb8(dest_img));
+        show_image(&DynamicImage::ImageRgb8(debug_qr_image));
 
         let mut search_img = rqrr::PreparedImage::prepare(decode_img);
         let grids = search_img.detect_grids();
