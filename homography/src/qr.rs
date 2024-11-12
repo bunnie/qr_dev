@@ -132,7 +132,7 @@ fn point_from_hv_lines(hline: &LineDerivation, vline: &LineDerivation) -> Option
 }
 
 // Threshold to reject points if they don't fit on the best-fit line
-const OUTLIER_THRESHOLD: f32 = 1.0;
+const OUTLIER_THRESHOLD: f32 = 0.5;
 const OUTLIER_ITERS: usize = 5;
 #[derive(Copy, Clone)]
 pub struct LineDerivation {
@@ -673,7 +673,7 @@ impl Into<isize> for TrendDirection {
 
 /// (0, 0) is at the lower left corner
 pub struct ImageRoi<'a> {
-    data: &'a mut [u8],
+    pub data: &'a mut [u8],
     pub width: usize,
     pub height: usize,
     thresh: u8,
@@ -821,25 +821,25 @@ impl<'a> ImageRoi<'a> {
         (!(self.binarize(self.data[index]) ^ color)).into()
     }
 
-    pub fn neighbor_count(&self, point: Point, color: Color) -> Option<usize> {
+    pub fn neighbor_luma(&self, point: Point) -> Option<u8> {
         let x = point.x;
         let y = point.y;
-        if x > 0 && x < (self.width - 1) as isize && y > 0 && y < (self.height - 1) as isize {
-            // Count 8 neighbors
-            let mut count: usize = 0;
+        let mut accumulated_luma = 0;
+        let mut total_counted = 0;
+        if x >= 0 && x < self.width as isize && y >= 0 && y < self.height as isize {
             for direction in Direction::eight_way_iter() {
-                let p: Point = direction.into();
-                count += self.to_count(x as isize + p.x, y as isize + p.y, color);
+                total_counted += 1;
+                let d: Point = direction.into();
+                let p: Point = d + point;
+                accumulated_luma += self.data[(p.y * (self.width as isize) + p.x).max(0) as usize] as usize;
             }
-            Some(count)
-        } else {
-            None
         }
+        if total_counted > 0 { Some((accumulated_luma / total_counted) as u8) } else { None }
     }
 
     /// This transforms ROI coordinates into image coordinates
-    pub fn neighbor_count_roi(&self, point: Point, color: Color) -> Option<usize> {
-        self.neighbor_count(self.roi_to_absolute(point).unwrap(), color)
+    pub fn neighbor_luma_roi(&self, point: Point) -> Option<u8> {
+        self.neighbor_luma(self.roi_to_absolute(point).unwrap())
     }
 
     pub fn roi_to_absolute(&self, point: Point) -> Option<Point> {
@@ -1121,10 +1121,10 @@ pub fn find_finders(candidates: &mut [Option<Point>], image: &[u8], thresh: u8, 
     candidate_width / candidate_index
 }
 
-const FP_SHIFT: usize = (1 << 16);
+const FP_SHIFT: usize = 1 << 16;
 /// Returns tuple of (version, expected_modules)
-pub fn guess_code_version(finder_width: usize, qr_modules: usize) -> (usize, usize) {
-    let incoming_ratio = ((qr_modules * FP_SHIFT) / finder_width) as isize;
+pub fn guess_code_version(finder_width_pix: usize, qr_width_pix: usize) -> (usize, usize) {
+    let incoming_ratio = ((qr_width_pix * FP_SHIFT) / finder_width_pix) as isize;
     let mut candidate_ratio = usize::MAX;
     let mut candidate = 0;
     let mut returned_modules = 0;
