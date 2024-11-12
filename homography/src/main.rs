@@ -97,8 +97,13 @@ fn draw_line(image: &mut RgbImage, l: &LineDerivation, color: [u8; 3]) {
 
 fn main() {
     // Load the PNG file
-    let mut img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
-    let dims = img.dimensions();
+    let flipped_img = image::open("../images/test256b.png").expect("Failed to load image").into_luma8();
+    let dims = flipped_img.dimensions();
+
+    let mut img = GrayImage::new(dims.0, dims.1);
+    for (x, y, &pixel) in flipped_img.enumerate_pixels() {
+        img.put_pixel(x, dims.1 - y - 1, pixel);
+    }
     println!("dimensions: {:?}", dims);
     // Handle to the luma version for image processing
     let mut image = &mut img;
@@ -234,16 +239,16 @@ fn main() {
         qr::find_finders(&mut checked_candidates, &dest_img, BW_THRESH, qr_width as _) as isize;
 
     println!("x_finder width: {}", x_finder_width);
-    // check that the new coordinates are within 1 pixel of the original
-    const XFORM_DELTA: isize = 1;
+    // check that the new coordinates are within delta pixels of the original
+    const XFORM_DELTA: isize = 2;
     let mut deltas = Vec::<Point>::new();
     for c in checked_candidates {
         println!("x_point: {:?}", c);
         for &xformed in x_candidates.iter() {
             let delta = xformed - c;
+            println!("delta: {:?}", delta);
             if delta.x.abs() <= XFORM_DELTA && delta.y.abs() <= XFORM_DELTA {
                 deltas.push(delta);
-                println!("delta: {:?}", delta);
             }
         }
     }
@@ -251,10 +256,75 @@ fn main() {
         println!("Transformation did not survive sanity check");
         return;
     }
-    let (version, modules) = qr::guess_code_version(x_finder_width as usize, qr_width);
+    let (version, modules) =
+        qr::guess_code_version(x_finder_width as usize, (qr_width as isize + HOMOGRAPHY_MARGIN * 2) as usize);
 
     println!("width: {}, image dims: {:?}", qr_width, dest_img.dimensions());
     println!("guessed version: {}, modules: {}", version, modules);
+    println!("QR symbol width in pixels: {}", qr_width - 2 * (HOMOGRAPHY_MARGIN.abs() as usize));
+
+    let qr = ImageRoi::new(&mut dest_img, (qr_width as u32, qr_width as u32), BW_THRESH);
+    let grid = stream_to_grid(&qr, qr_width, modules, HOMOGRAPHY_MARGIN.abs() as usize, &mut debug_qr_image);
+
+    show_image(&DynamicImage::ImageRgb8(debug_qr_image.clone()));
+    debug_qr_image.save("debug.png").ok();
+
+    println!("grid len {}", grid.len());
+    for y in 0..modules {
+        for x in 0..modules {
+            if grid[y * modules + x] {
+                print!("X");
+            } else {
+                print!(" ");
+            }
+        }
+        println!(" {:2}", y);
+    }
+
+    let simple = rqrr::SimpleGrid::from_func(modules, |x, y| grid[x + y * modules]);
+    let grid = rqrr::Grid::new(simple);
+    match grid.decode() {
+        Ok((meta, content)) => {
+            println!("meta: {:?}, content: {}", meta, content)
+        }
+        Err(e) => {
+            println!("{:?}", e);
+        }
+    }
+
+    #[cfg(feature = "rqrr")]
+    {
+        let test_grid = [
+            1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 1, 0, 1, 1, 1,
+            0, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1,
+            0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1,
+            1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 1,
+            1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0,
+            1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1,
+            1, 1, 0, 1, 1, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0,
+            1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 1,
+            0, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0,
+            0, 1, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0,
+            1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0,
+            1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1,
+            1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 1,
+        ];
+        for y in 0..21 {
+            for x in 0..21 {
+                if test_grid[y * 21 + x] == 1 {
+                    print!("X");
+                } else {
+                    print!(" ");
+                }
+            }
+            println!(" {:2}", y);
+        }
+        let simple = rqrr::SimpleGrid::from_func(21, |x, y| test_grid[y * 21 + x] == 1);
+        let grid = rqrr::Grid::new(simple);
+        let (_meta, content) = grid.decode().unwrap();
+        println!("{}", content);
+    }
 
     #[cfg(feature = "rqrr")]
     {
