@@ -1,3 +1,8 @@
+use image::ImageBuffer;
+
+use crate::Point;
+use crate::qr::*;
+
 /// This function takes a fraction described as `m.n`, where n is a fraction out of 1024, as well
 /// as an `end` value, and returns numbers going from `0..end` such that with each
 /// call of `next()` you produce a usize index in the range of `0..end` that is the
@@ -20,20 +25,27 @@
 ///    sub-pixel sampling, the error count would be applied at that iteration so that subsequent
 ///    indices absorb the delta into their future counts.
 
-const FIXED_POINT: usize = 1 << 10; // 1024
+pub const FIXED_POINT_SHIFT: usize = 10;
+pub const FIXED_POINT: usize = 1 << FIXED_POINT_SHIFT; // 1024
 
-pub struct FracInt {
-    m0: usize,
-    n0: usize,
-    m: usize,
-    n: usize,
+pub struct FracIter {
+    stride: usize,
+    current: usize,
     end: usize,
+    count: usize,
     finished: bool,
 }
-impl FracInt {
+impl FracIter {
     pub fn new(m: usize, n: usize, end: usize) -> Self {
         assert!(n < FIXED_POINT);
-        Self { m0: m, n0: n, m: 0, n: 0, end, finished: false }
+        // start the iterator at half the stride of a module
+        Self {
+            stride: (m << FIXED_POINT_SHIFT | n),
+            current: (m << FIXED_POINT_SHIFT | n) / 2,
+            end,
+            count: 0,
+            finished: false,
+        }
     }
 
     pub fn next(&mut self) -> Option<usize> {
@@ -41,16 +53,14 @@ impl FracInt {
         if self.finished {
             return None;
         }
-        self.m += self.m0;
-        self.n += self.n0;
-        // carry the fraction, if needed
-        if (self.n >> 10) > 0 {
-            self.m += 1;
-            self.n &= (1 << 10) - 1;
-        }
-        // perform rounding on n
-        let rounded_m = if self.n >= (FIXED_POINT >> 1) { self.m + 1 } else { self.m };
-        if rounded_m < self.end {
+        if self.count < self.end {
+            let rounded_m = if (self.current & (FIXED_POINT - 1)) >= (FIXED_POINT / 2) {
+                (self.current >> FIXED_POINT_SHIFT) + 1
+            } else {
+                self.current >> FIXED_POINT_SHIFT
+            };
+            self.current += self.stride;
+            self.count += 1;
             Some(rounded_m)
         } else {
             self.finished = true;
@@ -60,14 +70,14 @@ impl FracInt {
 
     pub fn reset(&mut self) {
         self.finished = false;
-        self.m = 0;
-        self.n = 0;
+        self.current = self.stride / 2;
+        self.count = 0;
     }
 
     pub fn error(&self) -> isize {
-        if self.n == 0 {
+        if (self.current & (FIXED_POINT - 1)) == 0 {
             0
-        } else if self.n >= (FIXED_POINT >> 1) {
+        } else if (self.current & (FIXED_POINT - 1)) >= (FIXED_POINT / 2) {
             1
         } else {
             -1
@@ -78,35 +88,64 @@ impl FracInt {
     pub fn nudge(&mut self, m: isize, n: usize) {
         assert!(n < FIXED_POINT);
         if m >= 0 {
-            self.m = (self.m as isize + m) as usize;
-            self.n = self.n + n;
-
-            // carry the fraction, if needed
-            if (self.n >> 10) > 0 {
-                self.m += 1;
-                self.n &= (1 << 10) - 1;
-            }
+            self.current += ((m as usize) << FIXED_POINT_SHIFT) | n;
         } else {
             // nudge down case
-            self.m = (self.m as isize + m) as usize;
-            if self.n >= n {
-                // no underflow, just decrement the fraction
-                self.n = self.n - n;
-            } else {
-                self.n = FIXED_POINT - (n - self.n);
-                self.m -= 1;
-            }
+            self.current -= ((-m as usize) << FIXED_POINT_SHIFT) | n;
         }
     }
 }
 
-/// The official spec term for a pixel of a QR code is a "module"
-pub struct ModuleExtract<'a> {
-    data: &'a mut [u8],
-    pub width: usize,
-    pub height: usize,
-    thresh: u8,
+use image::Rgb;
+pub fn stream_to_grid(
+    image: &ImageRoi,
+    qr_size_pixels: usize,
+    qr_size_modules: usize,
+    margin: usize,
+    debug: &mut ImageBuffer<Rgb<u8>, Vec<u8>>,
+) -> Vec<bool> {
+    let pix_per_module = ((qr_size_pixels - margin * 2) << FIXED_POINT_SHIFT) / qr_size_modules;
+    let mut x_frac = FracIter::new(
+        pix_per_module >> FIXED_POINT_SHIFT,
+        pix_per_module & ((FIXED_POINT) - 1),
+        qr_size_modules,
+    );
+    let mut y_frac = FracIter::new(
+        pix_per_module >> FIXED_POINT_SHIFT,
+        pix_per_module & ((FIXED_POINT) - 1),
+        qr_size_modules,
+    );
+    let mut grid = Vec::<bool>::new();
+    let mut i = 0;
+    println!("{}", qr_size_modules);
+    while let Some(y) = y_frac.next() {
+        const FUDGE_X: usize = 0;
+        const FUDGE_Y: usize = 0;
+        while let Some(x) = x_frac.next() {
+            debug.put_pixel((x + margin + FUDGE_X) as u32, (y + margin - FUDGE_Y) as u32, Rgb([255, 0, 0]));
+            if true {
+                if image.data[(y + margin - FUDGE_Y) * image.width + (x + margin + FUDGE_X)]
+                    < crate::BW_THRESH
+                {
+                    grid.push(true);
+                } else {
+                    grid.push(false);
+                }
+            } else {
+                if image
+                    .neighbor_luma(Point::new(x as isize + margin as isize, y as isize + margin as isize))
+                    .unwrap()
+                    < crate::BW_THRESH
+                {
+                    grid.push(true);
+                } else {
+                    grid.push(false);
+                }
+            }
+        }
+        x_frac.reset();
+        print!("{} ", i);
+        i += 1;
+    }
+    grid
 }
-
-// Next up: look at the table of valid codes and figure out the fractional pixel value
-// we should use to iterate through the resized QR array.
